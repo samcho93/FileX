@@ -30,8 +30,32 @@ public class PeerDiscoveryService
         _timeoutSeconds = timeoutSeconds;
     }
 
+    public string MachineName => _machineName;
+
     public List<PeerInfo> GetPeers() => _peers.Values.ToList();
     public PeerInfo? GetPeer(string peerId) => _peers.GetValueOrDefault(peerId);
+
+    /// <summary>
+    /// Register a peer that connected to us (called from the web server endpoint).
+    /// </summary>
+    public void RegisterIncomingPeer(string ip, int peerPort, string machineName)
+    {
+        var peerId = $"{ip}:{peerPort}";
+        var isNew = !_peers.ContainsKey(peerId);
+        _peers[peerId] = new PeerInfo
+        {
+            Id = peerId,
+            MachineName = machineName,
+            Address = $"http://{ip}:{peerPort}",
+            LastSeen = DateTime.UtcNow,
+            IsManual = true
+        };
+        if (isNew)
+        {
+            OnStatusChanged?.Invoke($"Peer connected: {machineName} ({ip})");
+            OnPeerDiscovered?.Invoke(_peers[peerId]);
+        }
+    }
 
     /// <summary>
     /// Manually add a peer by IP address (and optional port).
@@ -89,6 +113,15 @@ public class PeerDiscoveryService
             // Verify connectivity by fetching drives
             var resp = await http.GetAsync($"{address}/api/peer/drives");
             resp.EnsureSuccessStatusCode();
+
+            // Tell the remote peer about us so it can see us too
+            try
+            {
+                var myInfo = JsonSerializer.Serialize(new { machineName = _machineName, port = _port });
+                await http.PostAsync($"{address}/api/peer/connect",
+                    new StringContent(myInfo, Encoding.UTF8, "application/json"));
+            }
+            catch { /* best effort — remote will still work even if this fails */ }
 
             var peer = new PeerInfo
             {

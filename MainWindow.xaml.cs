@@ -15,6 +15,10 @@ public partial class MainWindow : Window
     private List<FileSystemEntry> _leftEntries = [], _rightEntries = [];
     private Point _dragStart;
     private bool _isDragging;
+    // Drag data stored in fields to avoid WPF OLE serialization crash
+    private TransferItem[]? _dragItems;
+    private string _dragSource = "";
+    private string _dragPeerAddr = "";
 
     // Display items
     class FileItem
@@ -353,65 +357,66 @@ public partial class MainWindow : Window
         _isDragging = true;
 
         var lv = s as ListView;
-        if (lv == null || lv.SelectedItems.Count == 0) return;
+        if (lv == null || lv.SelectedItems.Count == 0) { _isDragging = false; return; }
 
-        var items = lv.SelectedItems.Cast<FileItem>().Select(f => new TransferItem
+        bool isLeft = lv == LeftFileList;
+
+        // Store drag data in fields (avoids WPF OLE serialization crash with custom objects)
+        _dragItems = lv.SelectedItems.Cast<FileItem>().Select(f => new TransferItem
         {
             Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir
         }).ToArray();
+        _dragSource = isLeft ? "left" : "right";
+        _dragPeerAddr = isLeft ? "" : (_rightPeerAddress ?? "");
 
-        bool isLeft = lv == LeftFileList;
         var data = new DataObject();
-        data.SetData("FileXItems", items);
-        data.SetData("FileXSource", isLeft ? "left" : "right");
-        data.SetData("FileXPeerId", isLeft ? "" : (_rightPeerId ?? ""));
-        data.SetData("FileXPeerAddr", isLeft ? "" : (_rightPeerAddress ?? ""));
-
+        data.SetData("FileXDrag", "active"); // simple string marker for DragOver
         DragDrop.DoDragDrop(lv, data, DragDropEffects.Copy);
         _isDragging = false;
     }
 
     private void FileList_DragOver(object s, DragEventArgs e)
     {
-        e.Effects = e.Data.GetDataPresent("FileXItems") ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Effects = e.Data.GetDataPresent("FileXDrag") ? DragDropEffects.Copy : DragDropEffects.None;
         e.Handled = true;
     }
 
     private async void LeftFileList_Drop(object s, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent("FileXItems")) return;
-        var source = e.Data.GetData("FileXSource") as string;
-        if (source == "left") return;
+        if (!e.Data.GetDataPresent("FileXDrag") || _dragItems == null) return;
+        if (_dragSource == "left") return;
         if (_leftShowDrives) { MessageBox.Show("Please navigate to a folder first."); return; }
+        if (string.IsNullOrEmpty(_dragPeerAddr)) return;
 
-        var items = e.Data.GetData("FileXItems") as TransferItem[];
-        var peerAddr = e.Data.GetData("FileXPeerAddr") as string;
-        if (items == null || string.IsNullOrEmpty(peerAddr)) return;
+        var items = _dragItems;
+        var peerAddr = _dragPeerAddr;
+        ShowStatus($"Downloading {items.Length} item(s)...");
 
         try
         {
             await App.Api.TransferFromRemote(peerAddr, items, _leftPath);
+            ShowStatus($"Download complete — {items.Length} item(s)");
             await LeftNavigateTo(_leftPath);
         }
-        catch (Exception ex) { MessageBox.Show("Transfer failed: " + ex.Message); }
+        catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
     }
 
     private async void RightFileList_Drop(object s, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent("FileXItems")) return;
-        var source = e.Data.GetData("FileXSource") as string;
-        if (source == "right") return;
+        if (!e.Data.GetDataPresent("FileXDrag") || _dragItems == null) return;
+        if (_dragSource == "right") return;
         if (_rightShowDrives || _rightPeerAddress == null) { MessageBox.Show("Please navigate to a folder first."); return; }
 
-        var items = e.Data.GetData("FileXItems") as TransferItem[];
-        if (items == null) return;
+        var items = _dragItems;
+        ShowStatus($"Uploading {items.Length} item(s)...");
 
         try
         {
             await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath);
+            ShowStatus($"Upload complete — {items.Length} item(s)");
             await RightNavigateTo(_rightPath);
         }
-        catch (Exception ex) { MessageBox.Show("Transfer failed: " + ex.Message); }
+        catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
     }
 
     // ===== Utilities =====

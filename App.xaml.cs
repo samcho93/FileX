@@ -89,6 +89,27 @@ public partial class App : Application
         });
         app.MapPost("/api/peer/mkdir", (string path) => Directory.CreateDirectory(Path.GetFullPath(path)));
 
+        // Bidirectional peer registration: when a remote peer connects to us, it sends its info
+        app.MapPost("/api/peer/connect", async (HttpContext ctx) =>
+        {
+            try
+            {
+                var body = await JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body);
+                var name = body.GetProperty("machineName").GetString() ?? "Unknown";
+                var peerPort = body.GetProperty("port").GetInt32();
+                var ip = ctx.Connection.RemoteIpAddress?.MapToIPv4().ToString() ?? "";
+                if (!string.IsNullOrEmpty(ip))
+                {
+                    Discovery.RegisterIncomingPeer(ip, peerPort, name);
+                }
+                ctx.Response.StatusCode = 200;
+            }
+            catch
+            {
+                ctx.Response.StatusCode = 400;
+            }
+        });
+
         WebServerReady = true;
         OnAppStatus?.Invoke($"Web server started on port {Port}");
 
