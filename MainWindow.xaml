@@ -76,6 +76,8 @@
                             Margin="0" Height="28">
                     <Button Content="&#8593; Up" Click="LeftUp_Click" Margin="4,2"/>
                     <Button Content="Refresh" Click="LeftRefresh_Click" Margin="2"/>
+                    <Button Content="&#8594; Send" Click="CopyToRight_Click" Margin="2"
+                            ToolTip="Send selected files/folders to remote" FontSize="11"/>
                 </StackPanel>
                 <Grid>
                     <ListBox x:Name="LeftDriveList" Background="{StaticResource BgPrimary}"
@@ -146,6 +148,8 @@
                             Margin="0" Height="28">
                     <Button Content="&#8593; Up" Click="RightUp_Click" Margin="4,2"/>
                     <Button Content="Refresh" Click="RightRefresh_Click" Margin="2"/>
+                    <Button Content="&#8592; Receive" Click="CopyToLeft_Click" Margin="2"
+                            ToolTip="Download selected files/folders from remote" FontSize="11"/>
                 </StackPanel>
                 <Grid>
                     <ListBox x:Name="RightDriveList" Background="{StaticResource BgPrimary}"

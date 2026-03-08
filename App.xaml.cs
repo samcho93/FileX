@@ -8,6 +8,8 @@ using FileX.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Logging;
 
 namespace FileX;
@@ -20,6 +22,7 @@ public partial class App : Application
     public static HttpClient Http { get; } = new() { Timeout = TimeSpan.FromMinutes(30) };
     public static int Port { get; private set; } = 5000;
     public static event Action<string>? OnAppStatus;
+    public static event Action<string>? OnFileReceived; // fires with directory path when a file is uploaded to us
     public static bool WebServerReady { get; private set; }
 
     private readonly CancellationTokenSource _cts = new();
@@ -63,6 +66,7 @@ public partial class App : Application
     {
         var builder = WebApplication.CreateBuilder(Array.Empty<string>());
         builder.WebHost.UseUrls($"http://0.0.0.0:{Port}");
+        builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = null); // No file size limit
         builder.Logging.ClearProviders();
         var app = builder.Build();
 
@@ -86,8 +90,16 @@ public partial class App : Application
             if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
             await using var fs = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
             await ctx.Request.Body.CopyToAsync(fs);
+            // Notify UI that a file was received
+            if (dir != null) OnFileReceived?.Invoke(dir);
         });
-        app.MapPost("/api/peer/mkdir", (string path) => Directory.CreateDirectory(Path.GetFullPath(path)));
+        app.MapPost("/api/peer/mkdir", (string path) =>
+        {
+            var full = Path.GetFullPath(path);
+            Directory.CreateDirectory(full);
+            var parent = Path.GetDirectoryName(full);
+            if (parent != null) OnFileReceived?.Invoke(parent);
+        });
 
         // Bidirectional peer registration: when a remote peer connects to us, it sends its info
         app.MapPost("/api/peer/connect", async (HttpContext ctx) =>

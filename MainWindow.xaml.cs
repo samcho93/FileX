@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using FileX.Models;
 
 namespace FileX;
@@ -44,17 +45,49 @@ public partial class MainWindow : Window
     private static readonly Brush AccentBrush = new SolidColorBrush(Color.FromRgb(0x6c, 0x6c, 0xf0));
     private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(0xe0, 0xe0, 0xf0));
 
+    // Debounce timer for auto-refresh when files are received via API
+    private readonly DispatcherTimer _refreshTimer;
+
     public MainWindow()
     {
         InitializeComponent();
         TxtMachineName.Text = Environment.MachineName;
         LeftTitle.Text = Environment.MachineName + " (Local)";
 
+        // Debounced refresh: waits 500ms after last file received before refreshing
+        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _refreshTimer.Tick += async (_, _) =>
+        {
+            _refreshTimer.Stop();
+            if (!_leftShowDrives && !string.IsNullOrEmpty(_leftPath))
+                await LeftNavigateTo(_leftPath);
+        };
+
         App.Discovery.OnPeerDiscovered += p => Dispatcher.Invoke(() => AddPeer(p));
         App.Discovery.OnPeerLost += id => Dispatcher.Invoke(() => RemovePeer(id));
         App.Discovery.OnError += msg => Dispatcher.Invoke(() => ShowStatus($"⚠ {msg}"));
         App.Discovery.OnStatusChanged += msg => Dispatcher.Invoke(() => ShowStatus(msg));
         App.OnAppStatus += msg => Dispatcher.Invoke(() => ShowStatus(msg));
+
+        // Auto-refresh left panel when files are received from a remote peer
+        App.OnFileReceived += dir => Dispatcher.Invoke(() =>
+        {
+            if (!_leftShowDrives && !string.IsNullOrEmpty(_leftPath))
+            {
+                try
+                {
+                    var leftFull = Path.GetFullPath(_leftPath);
+                    var dirFull = Path.GetFullPath(dir);
+                    if (string.Equals(leftFull, dirFull, StringComparison.OrdinalIgnoreCase) ||
+                        dirFull.StartsWith(leftFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _refreshTimer.Stop();
+                        _refreshTimer.Start(); // debounce: restart timer
+                    }
+                }
+                catch { }
+            }
+        });
 
         Loaded += async (_, _) =>
         {
@@ -288,10 +321,21 @@ public partial class MainWindow : Window
 
     private readonly List<PeerInfo> _peers = [];
 
-    private void AddPeer(PeerInfo peer)
+    private async void AddPeer(PeerInfo peer)
     {
         var existing = _peers.FindIndex(p => p.Id == peer.Id);
         if (existing >= 0) _peers[existing] = peer; else _peers.Add(peer);
+
+        // Auto-select if no peer is currently selected
+        if (_rightPeerId == null)
+        {
+            _rightPeerId = peer.Id;
+            _rightPeerAddress = peer.Address;
+            RightTitle.Text = peer.MachineName + " (Remote)";
+            RenderPeers();
+            await RightLoadDrives();
+            return;
+        }
         RenderPeers();
     }
 
@@ -338,12 +382,78 @@ public partial class MainWindow : Window
         }
     }
 
+    // ===== Copy buttons =====
+
+    private async void CopyToRight_Click(object s, RoutedEventArgs e)
+    {
+        if (_rightPeerAddress == null) { ShowStatus("No peer connected"); return; }
+        if (_leftShowDrives) { ShowStatus("Navigate to a local folder first"); return; }
+        if (_rightShowDrives) { ShowStatus("Navigate to a remote folder first"); return; }
+
+        var items = LeftFileList.SelectedItems.Cast<FileItem>()
+            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir })
+            .ToArray();
+        if (items.Length == 0) { ShowStatus("Select files to send"); return; }
+
+        ShowStatus($"Uploading {items.Length} item(s)...");
+        try
+        {
+            await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath);
+            ShowStatus($"Upload complete — {items.Length} item(s)");
+            await RightNavigateTo(_rightPath);
+        }
+        catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
+    }
+
+    private async void CopyToLeft_Click(object s, RoutedEventArgs e)
+    {
+        if (_rightPeerAddress == null) { ShowStatus("No peer connected"); return; }
+        if (_leftShowDrives) { ShowStatus("Navigate to a local folder first"); return; }
+        if (_rightShowDrives) { ShowStatus("Navigate to a remote folder first"); return; }
+
+        var items = RightFileList.SelectedItems.Cast<FileItem>()
+            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir })
+            .ToArray();
+        if (items.Length == 0) { ShowStatus("Select files to download"); return; }
+
+        ShowStatus($"Downloading {items.Length} item(s)...");
+        try
+        {
+            await App.Api.TransferFromRemote(_rightPeerAddress, items, _leftPath);
+            ShowStatus($"Download complete — {items.Length} item(s)");
+            await LeftNavigateTo(_leftPath);
+        }
+        catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
+    }
+
     // ===== Drag & Drop =====
 
     private void FileList_PreviewMouseDown(object s, MouseButtonEventArgs e)
     {
         _dragStart = e.GetPosition(null);
         _isDragging = false;
+
+        // Prevent deselection of multi-selected items when starting a drag
+        if (s is ListView lv && lv.SelectedItems.Count > 1)
+        {
+            var hit = VisualTreeHelper.HitTest(lv, e.GetPosition(lv));
+            if (hit?.VisualHit != null)
+            {
+                var item = FindParent<ListViewItem>(hit.VisualHit as DependencyObject);
+                if (item != null && item.IsSelected)
+                    e.Handled = true; // prevent deselection
+            }
+        }
+    }
+
+    private static T? FindParent<T>(DependencyObject? obj) where T : DependencyObject
+    {
+        while (obj != null)
+        {
+            if (obj is T result) return result;
+            obj = VisualTreeHelper.GetParent(obj);
+        }
+        return null;
     }
 
     private void FileList_PreviewMouseMove(object s, MouseEventArgs e)
