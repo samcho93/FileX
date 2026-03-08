@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -173,22 +174,38 @@ public class PeerDiscoveryService
         {
             using var client = new UdpClient();
             client.EnableBroadcast = true;
+            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
             var msg = JsonSerializer.Serialize(new { instanceId = _instanceId, machineName = _machineName, port = _port });
             var data = Encoding.UTF8.GetBytes(msg);
-            var ep = new IPEndPoint(IPAddress.Broadcast, _discoveryPort);
 
-            OnStatusChanged?.Invoke($"Broadcasting on UDP port {_discoveryPort}...");
+            var broadcastAddrs = GetSubnetBroadcastAddresses();
+            var addrList = string.Join(", ", broadcastAddrs.Select(a => a.ToString()));
+            OnStatusChanged?.Invoke($"Broadcasting on UDP port {_discoveryPort} to: {addrList}");
 
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    await client.SendAsync(data, data.Length, ep);
+                    // Send to each subnet broadcast address (e.g. 192.168.1.255)
+                    foreach (var addr in broadcastAddrs)
+                    {
+                        try
+                        {
+                            await client.SendAsync(data, data.Length, new IPEndPoint(addr, _discoveryPort));
+                        }
+                        catch { /* skip failed interface */ }
+                    }
+
+                    // Also send to limited broadcast as fallback
+                    try
+                    {
+                        await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, _discoveryPort));
+                    }
+                    catch { }
                 }
                 catch (SocketException ex)
                 {
                     OnError?.Invoke($"Broadcast error: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
-                    // Wait a bit before retrying
                     try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { break; }
                     continue;
                 }
@@ -199,6 +216,9 @@ public class PeerDiscoveryService
 
                 try { await Task.Delay(_intervalSeconds * 1000, ct); }
                 catch (OperationCanceledException) { break; }
+
+                // Refresh broadcast addresses periodically (network changes)
+                broadcastAddrs = GetSubnetBroadcastAddresses();
             }
         }
         catch (SocketException ex)
@@ -213,6 +233,7 @@ public class PeerDiscoveryService
         {
             using var listener = new UdpClient();
             listener.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            listener.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
             listener.Client.Bind(new IPEndPoint(IPAddress.Any, _discoveryPort));
 
             OnStatusChanged?.Invoke($"Listening on UDP port {_discoveryPort}...");
@@ -234,16 +255,22 @@ public class PeerDiscoveryService
 
                     var peerId = $"{ip}:{peerPort}";
                     var isNew = !_peers.ContainsKey(peerId);
-                    _peers[peerId] = new PeerInfo
+                    var peerInfo = new PeerInfo
                     {
                         Id = peerId, MachineName = name,
                         Address = $"http://{ip}:{peerPort}",
                         LastSeen = DateTime.UtcNow
                     };
+                    _peers[peerId] = peerInfo;
                     if (isNew)
                     {
                         OnStatusChanged?.Invoke($"Discovered peer: {name} ({ip})");
-                        OnPeerDiscovered?.Invoke(_peers[peerId]);
+                        OnPeerDiscovered?.Invoke(peerInfo);
+                    }
+                    else
+                    {
+                        // Update LastSeen for existing peers
+                        _peers[peerId].LastSeen = DateTime.UtcNow;
                     }
                 }
                 catch (OperationCanceledException) { break; }
@@ -262,6 +289,38 @@ public class PeerDiscoveryService
         {
             OnError?.Invoke($"Cannot start listener on port {_discoveryPort}: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
         }
+    }
+
+    /// <summary>
+    /// Get subnet-directed broadcast addresses for all active IPv4 network interfaces.
+    /// E.g. for 192.168.1.5/255.255.255.0, returns 192.168.1.255
+    /// </summary>
+    private static List<IPAddress> GetSubnetBroadcastAddresses()
+    {
+        var result = new List<IPAddress>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+
+                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+
+                    var ipBytes = addr.Address.GetAddressBytes();
+                    var maskBytes = addr.IPv4Mask.GetAddressBytes();
+                    var broadcastBytes = new byte[4];
+                    for (int i = 0; i < 4; i++)
+                        broadcastBytes[i] = (byte)(ipBytes[i] | ~maskBytes[i]);
+
+                    result.Add(new IPAddress(broadcastBytes));
+                }
+            }
+        }
+        catch { }
+        return result;
     }
 
     private async Task CleanupAsync(CancellationToken ct)
