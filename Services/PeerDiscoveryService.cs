@@ -18,6 +18,9 @@ public class PeerDiscoveryService
     private readonly int _timeoutSeconds;
     private readonly ConcurrentDictionary<string, PeerInfo> _peers = new();
 
+    // Multicast group for peer discovery (organization-local scope)
+    private static readonly IPAddress MulticastGroup = IPAddress.Parse("239.255.45.88");
+
     public event Action<PeerInfo>? OnPeerDiscovered;
     public event Action<string>? OnPeerLost;
     public event Action<string>? OnError;
@@ -105,7 +108,7 @@ public class PeerDiscoveryService
                 if (infoResp.IsSuccessStatusCode)
                 {
                     var json = await infoResp.Content.ReadAsStringAsync();
-                    var doc = System.Text.Json.JsonDocument.Parse(json);
+                    var doc = JsonDocument.Parse(json);
                     machineName = doc.RootElement.GetProperty("machineName").GetString() ?? ip;
                 }
             }
@@ -157,10 +160,13 @@ public class PeerDiscoveryService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        OnStatusChanged?.Invoke("Starting peer discovery...");
+        OnStatusChanged?.Invoke("Starting peer discovery (multicast + broadcast)...");
         try
         {
-            await Task.WhenAll(BroadcastAsync(ct), ListenAsync(ct), CleanupAsync(ct));
+            await Task.WhenAll(
+                SendAsync(ct),
+                ListenAsync(ct),
+                CleanupAsync(ct));
         }
         catch (Exception ex)
         {
@@ -168,65 +174,69 @@ public class PeerDiscoveryService
         }
     }
 
-    private async Task BroadcastAsync(CancellationToken ct)
+    /// <summary>
+    /// Send discovery messages via both UDP multicast and broadcast.
+    /// </summary>
+    private async Task SendAsync(CancellationToken ct)
     {
         try
         {
             using var client = new UdpClient();
-            client.EnableBroadcast = true;
+            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
+            // Multicast TTL = 2 (stay within local network)
+            client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 2);
+
             var msg = JsonSerializer.Serialize(new { instanceId = _instanceId, machineName = _machineName, port = _port });
             var data = Encoding.UTF8.GetBytes(msg);
 
-            var broadcastAddrs = GetSubnetBroadcastAddresses();
-            var addrList = string.Join(", ", broadcastAddrs.Select(a => a.ToString()));
-            OnStatusChanged?.Invoke($"Broadcasting on UDP port {_discoveryPort} to: {addrList}");
+            OnStatusChanged?.Invoke($"Sending discovery on multicast {MulticastGroup} + broadcast, port {_discoveryPort}");
 
             while (!ct.IsCancellationRequested)
             {
+                // 1. Send to multicast group
                 try
                 {
-                    // Send to each subnet broadcast address (e.g. 192.168.1.255)
-                    foreach (var addr in broadcastAddrs)
-                    {
-                        try
-                        {
-                            await client.SendAsync(data, data.Length, new IPEndPoint(addr, _discoveryPort));
-                        }
-                        catch { /* skip failed interface */ }
-                    }
-
-                    // Also send to limited broadcast as fallback
-                    try
-                    {
-                        await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, _discoveryPort));
-                    }
-                    catch { }
-                }
-                catch (SocketException ex)
-                {
-                    OnError?.Invoke($"Broadcast error: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
-                    try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { break; }
-                    continue;
+                    await client.SendAsync(data, data.Length, new IPEndPoint(MulticastGroup, _discoveryPort));
                 }
                 catch (Exception ex)
                 {
-                    OnError?.Invoke($"Broadcast error: {ex.Message}");
+                    OnError?.Invoke($"Multicast send error: {ex.Message}");
                 }
+
+                // 2. Send to subnet broadcast addresses
+                var broadcastAddrs = GetSubnetBroadcastAddresses();
+                foreach (var addr in broadcastAddrs)
+                {
+                    try
+                    {
+                        await client.SendAsync(data, data.Length, new IPEndPoint(addr, _discoveryPort));
+                    }
+                    catch { /* skip failed interface */ }
+                }
+
+                // 3. Send to limited broadcast as fallback
+                try
+                {
+                    await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, _discoveryPort));
+                }
+                catch { }
 
                 try { await Task.Delay(_intervalSeconds * 1000, ct); }
                 catch (OperationCanceledException) { break; }
-
-                // Refresh broadcast addresses periodically (network changes)
-                broadcastAddrs = GetSubnetBroadcastAddresses();
             }
         }
         catch (SocketException ex)
         {
-            OnError?.Invoke($"Cannot start broadcast: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
+            OnError?.Invoke($"Cannot start discovery sender: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
         }
     }
 
+    /// <summary>
+    /// Single listener that receives both multicast and broadcast messages.
+    /// Joins the multicast group to receive multicast, and also receives broadcast
+    /// since it binds to IPAddress.Any.
+    /// </summary>
     private async Task ListenAsync(CancellationToken ct)
     {
         try
@@ -236,42 +246,43 @@ public class PeerDiscoveryService
             listener.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
             listener.Client.Bind(new IPEndPoint(IPAddress.Any, _discoveryPort));
 
-            OnStatusChanged?.Invoke($"Listening on UDP port {_discoveryPort}...");
+            // Join multicast group to receive multicast messages
+            var joined = false;
+            try
+            {
+                listener.JoinMulticastGroup(MulticastGroup);
+                joined = true;
+            }
+            catch
+            {
+                // Try joining on each interface individually
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+                    if (!ni.SupportsMulticast) continue;
+
+                    foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                        try
+                        {
+                            listener.JoinMulticastGroup(MulticastGroup, addr.Address);
+                            joined = true;
+                        }
+                        catch { /* skip this interface */ }
+                    }
+                }
+            }
+
+            OnStatusChanged?.Invoke($"Listening on UDP port {_discoveryPort} (multicast: {(joined ? "yes" : "no")}, broadcast: yes)");
 
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
                     var result = await listener.ReceiveAsync(ct);
-                    var json = Encoding.UTF8.GetString(result.Buffer);
-                    var d = JsonSerializer.Deserialize<JsonElement>(json);
-                    var instId = d.GetProperty("instanceId").GetString() ?? "";
-                    if (instId == _instanceId) continue;
-
-                    var name = d.GetProperty("machineName").GetString() ?? "";
-                    var peerPort = d.GetProperty("port").GetInt32();
-                    var ip = result.RemoteEndPoint.Address.ToString();
-                    if (ip.StartsWith("::ffff:")) ip = ip[7..];
-
-                    var peerId = $"{ip}:{peerPort}";
-                    var isNew = !_peers.ContainsKey(peerId);
-                    var peerInfo = new PeerInfo
-                    {
-                        Id = peerId, MachineName = name,
-                        Address = $"http://{ip}:{peerPort}",
-                        LastSeen = DateTime.UtcNow
-                    };
-                    _peers[peerId] = peerInfo;
-                    if (isNew)
-                    {
-                        OnStatusChanged?.Invoke($"Discovered peer: {name} ({ip})");
-                        OnPeerDiscovered?.Invoke(peerInfo);
-                    }
-                    else
-                    {
-                        // Update LastSeen for existing peers
-                        _peers[peerId].LastSeen = DateTime.UtcNow;
-                    }
+                    ProcessDiscoveryMessage(result);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (SocketException ex)
@@ -289,6 +300,47 @@ public class PeerDiscoveryService
         {
             OnError?.Invoke($"Cannot start listener on port {_discoveryPort}: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
         }
+    }
+
+    /// <summary>
+    /// Process a received UDP discovery message and register the peer.
+    /// </summary>
+    private void ProcessDiscoveryMessage(UdpReceiveResult result)
+    {
+        try
+        {
+            var json = Encoding.UTF8.GetString(result.Buffer);
+            var d = JsonSerializer.Deserialize<JsonElement>(json);
+            var instId = d.GetProperty("instanceId").GetString() ?? "";
+            if (instId == _instanceId) return;
+
+            var name = d.GetProperty("machineName").GetString() ?? "";
+            var peerPort = d.GetProperty("port").GetInt32();
+            var ip = result.RemoteEndPoint.Address.ToString();
+            if (ip.StartsWith("::ffff:")) ip = ip[7..];
+
+            var peerId = $"{ip}:{peerPort}";
+            var isNew = !_peers.ContainsKey(peerId);
+            var peerInfo = new PeerInfo
+            {
+                Id = peerId,
+                MachineName = name,
+                Address = $"http://{ip}:{peerPort}",
+                LastSeen = DateTime.UtcNow
+            };
+            _peers[peerId] = peerInfo;
+            if (isNew)
+            {
+                OnStatusChanged?.Invoke($"Discovered peer: {name} ({ip})");
+                OnPeerDiscovered?.Invoke(peerInfo);
+            }
+            else
+            {
+                // Update LastSeen for existing peers
+                _peers[peerId].LastSeen = DateTime.UtcNow;
+            }
+        }
+        catch { /* ignore malformed messages */ }
     }
 
     /// <summary>

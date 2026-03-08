@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -21,6 +22,9 @@ public partial class MainWindow : Window
     private string _dragSource = "";
     private string _dragPeerAddr = "";
 
+    // Transfer progress tracking
+    private readonly ObservableCollection<TransferProgressInfo> _transfers = [];
+
     // Display items
     class FileItem
     {
@@ -30,6 +34,7 @@ public partial class MainWindow : Window
         public string DateText { get; set; } = "";
         public string FullPath { get; set; } = "";
         public bool IsDir { get; set; }
+        public long Size { get; set; }
         public Brush NameColor { get; set; } = Brushes.White;
     }
 
@@ -54,6 +59,9 @@ public partial class MainWindow : Window
         TxtMachineName.Text = Environment.MachineName;
         LeftTitle.Text = Environment.MachineName + " (Local)";
 
+        // Bind transfer list
+        TransferList.ItemsSource = _transfers;
+
         // Debounced refresh: waits 500ms after last file received before refreshing
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _refreshTimer.Tick += async (_, _) =>
@@ -65,7 +73,7 @@ public partial class MainWindow : Window
 
         App.Discovery.OnPeerDiscovered += p => Dispatcher.Invoke(() => AddPeer(p));
         App.Discovery.OnPeerLost += id => Dispatcher.Invoke(() => RemovePeer(id));
-        App.Discovery.OnError += msg => Dispatcher.Invoke(() => ShowStatus($"⚠ {msg}"));
+        App.Discovery.OnError += msg => Dispatcher.Invoke(() => ShowStatus($"\u26a0 {msg}"));
         App.Discovery.OnStatusChanged += msg => Dispatcher.Invoke(() => ShowStatus(msg));
         App.OnAppStatus += msg => Dispatcher.Invoke(() => ShowStatus(msg));
 
@@ -101,12 +109,58 @@ public partial class MainWindow : Window
         var ips = App.GetLocalIPs();
         var ipText = ips.Count > 0 ? string.Join(", ", ips) : "No network";
         TxtMachineName.Text = $"{Environment.MachineName}  |  {ipText}:{App.Port}";
-        ShowStatus($"Ready — Other PCs can connect to: {ipText}:{App.Port}");
+        ShowStatus($"Ready \u2014 Other PCs can connect to: {ipText}:{App.Port}");
     }
 
     private void ShowStatus(string msg)
     {
         TxtStatus.Text = msg;
+    }
+
+    // ===== Transfer progress helpers =====
+
+    private void OnTransferFileStart(TransferProgressInfo info)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _transfers.Add(info);
+            TransferPanel.Visibility = Visibility.Visible;
+        });
+    }
+
+    private void OnTransferProgress(TransferProgressInfo info)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            // Force UI update by raising property changed (already handled by INotifyPropertyChanged)
+            // The binding will pick up the changes automatically
+        });
+    }
+
+    private void OnTransferFileComplete(TransferProgressInfo info)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            // Auto-remove completed transfers after 3 seconds
+            if (info.Status == TransferStatus.Completed)
+            {
+                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    _transfers.Remove(info);
+                    if (_transfers.Count == 0)
+                        TransferPanel.Visibility = Visibility.Collapsed;
+                };
+                timer.Start();
+            }
+        });
+    }
+
+    private void ClearTransfers_Click(object s, RoutedEventArgs e)
+    {
+        _transfers.Clear();
+        TransferPanel.Visibility = Visibility.Collapsed;
     }
 
     // ===== Left panel (local) =====
@@ -211,6 +265,7 @@ public partial class MainWindow : Window
                 DateText = e.LastModified.ToString("yyyy-MM-dd HH:mm"),
                 FullPath = e.FullPath,
                 IsDir = e.IsDirectory,
+                Size = e.Size,
                 NameColor = e.IsDirectory ? AccentBrush : TextBrush
             });
         }
@@ -226,14 +281,54 @@ public partial class MainWindow : Window
 
     private StackPanel MakeDrivePanel(DriveEntry d, double pct)
     {
-        var icon = d.DriveType switch { "Fixed" => "\U0001F4BE", "Removable" => "\U0001F50C", "CDRom" => "\U0001F4BF", _ => "\U0001F4BE" };
+        // Use text symbols with explicit light foreground for dark theme readability
+        var icon = d.DriveType switch
+        {
+            "Fixed" => "\u25a0",      // filled square
+            "Removable" => "\u25c6",  // diamond
+            "CDRom" => "\u25cb",      // circle
+            "Network" => "\u25b2",    // triangle
+            _ => "\u25a0"
+        };
         var sp = new StackPanel { Orientation = Orientation.Horizontal, Tag = d.Name };
-        sp.Children.Add(new TextBlock { Text = icon, FontSize = 20, Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center });
+        sp.Children.Add(new TextBlock
+        {
+            Text = icon,
+            FontSize = 20,
+            Margin = new Thickness(0, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = AccentBrush
+        });
         var info = new StackPanel();
-        info.Children.Add(new TextBlock { Text = $"{d.Name} {(string.IsNullOrEmpty(d.Label) ? "" : $"({d.Label})")}", FontWeight = FontWeights.SemiBold, FontSize = 13, Foreground = TextBrush });
-        info.Children.Add(new TextBlock { Text = $"{FormatSize(d.FreeSpace)} free of {FormatSize(d.TotalSize)} - {d.DriveType}", FontSize = 11, Foreground = (Brush)FindResource("TextMuted") });
-        var bar = new Border { Width = 100, Height = 4, Background = (Brush)FindResource("BgPrimary"), CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 3, 0, 0) };
-        var fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), HorizontalAlignment = HorizontalAlignment.Left, Width = pct, Background = pct > 90 ? Brushes.Red : pct > 75 ? Brushes.Orange : AccentBrush };
+        info.Children.Add(new TextBlock
+        {
+            Text = $"{d.Name} {(string.IsNullOrEmpty(d.Label) ? "" : $"({d.Label})")}",
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 13,
+            Foreground = TextBrush
+        });
+        info.Children.Add(new TextBlock
+        {
+            Text = $"{FormatSize(d.FreeSpace)} free of {FormatSize(d.TotalSize)} - {d.DriveType}",
+            FontSize = 11,
+            Foreground = (Brush)FindResource("TextMuted")
+        });
+        var bar = new Border
+        {
+            Width = 100,
+            Height = 4,
+            Background = (Brush)FindResource("BgPrimary"),
+            CornerRadius = new CornerRadius(2),
+            Margin = new Thickness(0, 3, 0, 0)
+        };
+        var fill = new Border
+        {
+            Height = 4,
+            CornerRadius = new CornerRadius(2),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Width = pct,
+            Background = pct > 90 ? Brushes.Red : pct > 75 ? Brushes.Orange : AccentBrush
+        };
         bar.Child = fill;
         info.Children.Add(bar);
         sp.Children.Add(info);
@@ -354,7 +449,7 @@ public partial class MainWindow : Window
         {
             var btn = new Button
             {
-                Content = "\u2B24 " + p.MachineName,
+                Content = "\u2b24 " + p.MachineName,
                 Tag = p.Id,
                 Margin = new Thickness(0, 0, 4, 0),
                 Padding = new Thickness(8, 3, 8, 3),
@@ -391,15 +486,16 @@ public partial class MainWindow : Window
         if (_rightShowDrives) { ShowStatus("Navigate to a remote folder first"); return; }
 
         var items = LeftFileList.SelectedItems.Cast<FileItem>()
-            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir })
+            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir, Size = f.Size })
             .ToArray();
         if (items.Length == 0) { ShowStatus("Select files to send"); return; }
 
         ShowStatus($"Uploading {items.Length} item(s)...");
         try
         {
-            await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath);
-            ShowStatus($"Upload complete — {items.Length} item(s)");
+            await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath,
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+            ShowStatus($"Upload complete \u2014 {items.Length} item(s)");
             await RightNavigateTo(_rightPath);
         }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
@@ -412,15 +508,16 @@ public partial class MainWindow : Window
         if (_rightShowDrives) { ShowStatus("Navigate to a remote folder first"); return; }
 
         var items = RightFileList.SelectedItems.Cast<FileItem>()
-            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir })
+            .Select(f => new TransferItem { Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir, Size = f.Size })
             .ToArray();
         if (items.Length == 0) { ShowStatus("Select files to download"); return; }
 
         ShowStatus($"Downloading {items.Length} item(s)...");
         try
         {
-            await App.Api.TransferFromRemote(_rightPeerAddress, items, _leftPath);
-            ShowStatus($"Download complete — {items.Length} item(s)");
+            await App.Api.TransferFromRemote(_rightPeerAddress, items, _leftPath,
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+            ShowStatus($"Download complete \u2014 {items.Length} item(s)");
             await LeftNavigateTo(_leftPath);
         }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
@@ -474,7 +571,7 @@ public partial class MainWindow : Window
         // Store drag data in fields (avoids WPF OLE serialization crash with custom objects)
         _dragItems = lv.SelectedItems.Cast<FileItem>().Select(f => new TransferItem
         {
-            Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir
+            Name = f.Name, FullPath = f.FullPath, IsDirectory = f.IsDir, Size = f.Size
         }).ToArray();
         _dragSource = isLeft ? "left" : "right";
         _dragPeerAddr = isLeft ? "" : (_rightPeerAddress ?? "");
@@ -504,8 +601,9 @@ public partial class MainWindow : Window
 
         try
         {
-            await App.Api.TransferFromRemote(peerAddr, items, _leftPath);
-            ShowStatus($"Download complete — {items.Length} item(s)");
+            await App.Api.TransferFromRemote(peerAddr, items, _leftPath,
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+            ShowStatus($"Download complete \u2014 {items.Length} item(s)");
             await LeftNavigateTo(_leftPath);
         }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
@@ -522,8 +620,9 @@ public partial class MainWindow : Window
 
         try
         {
-            await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath);
-            ShowStatus($"Upload complete — {items.Length} item(s)");
+            await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath,
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+            ShowStatus($"Upload complete \u2014 {items.Length} item(s)");
             await RightNavigateTo(_rightPath);
         }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }

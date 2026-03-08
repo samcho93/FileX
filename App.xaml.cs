@@ -79,7 +79,9 @@ public partial class App : Application
         {
             var full = Path.GetFullPath(path);
             if (!File.Exists(full)) { ctx.Response.StatusCode = 404; return; }
+            var fileInfo = new FileInfo(full);
             ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.ContentLength = fileInfo.Length;
             await using var s = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true);
             await s.CopyToAsync(ctx.Response.Body);
         });
