@@ -152,6 +152,7 @@
                               AllowDrop="True" Drop="LeftFileList_Drop" DragOver="FileList_DragOver"
                               PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
                               PreviewMouseMove="FileList_PreviewMouseMove"
+                              PreviewMouseLeftButtonUp="FileList_PreviewMouseUp"
                               MouseDoubleClick="LeftFileList_MouseDoubleClick"
                               KeyDown="LeftFileList_KeyDown">
                         <ListView.View>
@@ -227,6 +228,7 @@
                               AllowDrop="True" Drop="RightFileList_Drop" DragOver="FileList_DragOver"
                               PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
                               PreviewMouseMove="FileList_PreviewMouseMove"
+                              PreviewMouseLeftButtonUp="FileList_PreviewMouseUp"
                               MouseDoubleClick="RightFileList_MouseDoubleClick"
                               KeyDown="RightFileList_KeyDown">
                         <ListView.View>

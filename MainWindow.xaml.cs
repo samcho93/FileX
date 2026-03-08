@@ -2,9 +2,11 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using FileX.Controls;
 using FileX.Models;
 
 namespace FileX;
@@ -22,6 +24,12 @@ public partial class MainWindow : Window
     private TransferItem[]? _dragItems;
     private string _dragSource = "";
     private string _dragPeerAddr = "";
+
+    // Marquee (rubber-band) selection
+    private bool _isMarqueeSelecting;
+    private Point _marqueeStart;
+    private ListView? _marqueeListView;
+    private MarqueeAdorner? _marqueeAdorner;
 
     // Transfer progress tracking
     private readonly ObservableCollection<TransferProgressInfo> _transfers = [];
@@ -584,19 +592,44 @@ public partial class MainWindow : Window
 
     private void FileList_PreviewMouseDown(object s, MouseButtonEventArgs e)
     {
+        if (s is not ListView lv) return;
         _dragStart = e.GetPosition(null);
         _isDragging = false;
 
-        // Prevent deselection of multi-selected items when starting a drag
-        if (s is ListView lv && lv.SelectedItems.Count > 1)
+        var hit = VisualTreeHelper.HitTest(lv, e.GetPosition(lv));
+        if (hit?.VisualHit == null) return;
+
+        // Don't start marquee if clicking on column header or scrollbar
+        if (FindParent<GridViewColumnHeader>(hit.VisualHit as DependencyObject) != null) return;
+        if (FindParent<System.Windows.Controls.Primitives.ScrollBar>(hit.VisualHit as DependencyObject) != null) return;
+
+        var listViewItem = FindParent<ListViewItem>(hit.VisualHit as DependencyObject);
+
+        if (listViewItem != null)
         {
-            var hit = VisualTreeHelper.HitTest(lv, e.GetPosition(lv));
-            if (hit?.VisualHit != null)
+            // Clicked on an item - existing drag behavior
+            if (lv.SelectedItems.Count > 1 && listViewItem.IsSelected)
+                e.Handled = true; // prevent deselection
+        }
+        else
+        {
+            // Clicked on empty space - start marquee selection
+            _isMarqueeSelecting = true;
+            _marqueeStart = e.GetPosition(lv);
+            _marqueeListView = lv;
+
+            if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
+                lv.SelectedItems.Clear();
+
+            var adornerLayer = AdornerLayer.GetAdornerLayer(lv);
+            if (adornerLayer != null)
             {
-                var item = FindParent<ListViewItem>(hit.VisualHit as DependencyObject);
-                if (item != null && item.IsSelected)
-                    e.Handled = true; // prevent deselection
+                _marqueeAdorner = new MarqueeAdorner(lv);
+                adornerLayer.Add(_marqueeAdorner);
             }
+
+            lv.CaptureMouse();
+            e.Handled = true;
         }
     }
 
@@ -612,9 +645,19 @@ public partial class MainWindow : Window
 
     private void FileList_PreviewMouseMove(object s, MouseEventArgs e)
     {
+        // Marquee selection mode
+        if (_isMarqueeSelecting && _marqueeListView == s && s is ListView marquee)
+        {
+            var pos = e.GetPosition(marquee);
+            _marqueeAdorner?.Update(_marqueeStart, pos);
+            SelectItemsInMarquee(marquee, new Rect(_marqueeStart, pos));
+            return;
+        }
+
+        // Drag-and-drop mode
         if (e.LeftButton != MouseButtonState.Pressed) return;
-        var pos = e.GetPosition(null);
-        var diff = _dragStart - pos;
+        var pos2 = e.GetPosition(null);
+        var diff = _dragStart - pos2;
         if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance &&
             Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance) return;
         if (_isDragging) return;
@@ -637,6 +680,45 @@ public partial class MainWindow : Window
         data.SetData("FileXDrag", "active"); // simple string marker for DragOver
         DragDrop.DoDragDrop(lv, data, DragDropEffects.Copy);
         _isDragging = false;
+    }
+
+    private void FileList_PreviewMouseUp(object s, MouseButtonEventArgs e)
+    {
+        if (_isMarqueeSelecting)
+        {
+            _isMarqueeSelecting = false;
+            if (_marqueeAdorner != null && _marqueeListView != null)
+            {
+                var adornerLayer = AdornerLayer.GetAdornerLayer(_marqueeListView);
+                adornerLayer?.Remove(_marqueeAdorner);
+                _marqueeAdorner = null;
+            }
+            _marqueeListView?.ReleaseMouseCapture();
+            _marqueeListView = null;
+        }
+    }
+
+    private void SelectItemsInMarquee(ListView lv, Rect marqueeRect)
+    {
+        bool ctrlHeld = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+
+        for (int i = 0; i < lv.Items.Count; i++)
+        {
+            if (lv.ItemContainerGenerator.ContainerFromIndex(i) is not ListViewItem item)
+                continue;
+
+            var topLeft = item.TranslatePoint(new Point(0, 0), lv);
+            var itemRect = new Rect(topLeft, new Size(item.ActualWidth, item.ActualHeight));
+
+            if (marqueeRect.IntersectsWith(itemRect))
+            {
+                if (!item.IsSelected) item.IsSelected = true;
+            }
+            else if (!ctrlHeld)
+            {
+                if (item.IsSelected) item.IsSelected = false;
+            }
+        }
     }
 
     private void FileList_DragOver(object s, DragEventArgs e)
