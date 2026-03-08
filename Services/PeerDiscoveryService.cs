@@ -160,12 +160,13 @@ public class PeerDiscoveryService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        OnStatusChanged?.Invoke("Starting peer discovery (multicast + broadcast)...");
+        OnStatusChanged?.Invoke("Starting peer discovery...");
         try
         {
             await Task.WhenAll(
-                SendAsync(ct),
-                ListenAsync(ct),
+                TcpScanAsync(ct),       // Primary: TCP subnet scan (most reliable)
+                SendAsync(ct),          // Secondary: UDP multicast + broadcast
+                ListenAsync(ct),        // Secondary: UDP listener
                 CleanupAsync(ct));
         }
         catch (Exception ex)
@@ -173,6 +174,200 @@ public class PeerDiscoveryService
             OnError?.Invoke($"Discovery service stopped: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// TCP-based peer discovery: scans all IPs in local subnets for FileX instances.
+    /// This is the most reliable method since TCP works on any network where manual connect works.
+    /// </summary>
+    private async Task TcpScanAsync(CancellationToken ct)
+    {
+        // Wait for web server to be ready before scanning
+        await Task.Delay(3000, ct);
+
+        OnStatusChanged?.Invoke("Scanning local network for peers...");
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var localAddresses = GetLocalAddressesWithMask();
+                if (localAddresses.Count == 0)
+                {
+                    OnError?.Invoke("No network interfaces found for scanning");
+                    await Task.Delay(30_000, ct);
+                    continue;
+                }
+
+                foreach (var (localIp, mask) in localAddresses)
+                {
+                    if (ct.IsCancellationRequested) break;
+
+                    var candidates = GetSubnetHosts(localIp, mask);
+                    if (candidates.Count == 0) continue;
+
+                    OnStatusChanged?.Invoke($"Scanning {candidates.Count} hosts on {localIp}...");
+
+                    // Scan in parallel with limited concurrency
+                    var semaphore = new SemaphoreSlim(30); // 30 concurrent connections
+                    var tasks = candidates.Select(async ip =>
+                    {
+                        await semaphore.WaitAsync(ct);
+                        try
+                        {
+                            await TryConnectPeer(ip, _port, ct);
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                        }
+                    });
+
+                    await Task.WhenAll(tasks);
+                }
+
+                var peerCount = _peers.Count;
+                OnStatusChanged?.Invoke(peerCount > 0
+                    ? $"Found {peerCount} peer(s). Next scan in {_intervalSeconds * 3}s..."
+                    : $"No peers found. Next scan in {_intervalSeconds * 3}s...");
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                OnError?.Invoke($"Scan error: {ex.Message}");
+            }
+
+            // Wait before next scan (longer interval than UDP since scanning is heavier)
+            try { await Task.Delay(_intervalSeconds * 3000, ct); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    /// <summary>
+    /// Try to connect to a potential peer via TCP HTTP.
+    /// </summary>
+    private async Task TryConnectPeer(string ip, int port, CancellationToken ct)
+    {
+        var peerId = $"{ip}:{port}";
+
+        // Skip if already known
+        if (_peers.ContainsKey(peerId))
+        {
+            _peers[peerId].LastSeen = DateTime.UtcNow;
+            return;
+        }
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(800) };
+            var address = $"http://{ip}:{port}";
+
+            // Quick check: try /api/peer/info
+            var resp = await http.GetAsync($"{address}/api/peer/info", ct);
+            if (!resp.IsSuccessStatusCode) return;
+
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            var doc = JsonDocument.Parse(json);
+            var machineName = doc.RootElement.GetProperty("machineName").GetString() ?? ip;
+
+            // It's a FileX instance! Register it.
+            var peer = new PeerInfo
+            {
+                Id = peerId,
+                MachineName = machineName,
+                Address = address,
+                LastSeen = DateTime.UtcNow
+            };
+
+            var isNew = !_peers.ContainsKey(peerId);
+            _peers[peerId] = peer;
+
+            if (isNew)
+            {
+                OnStatusChanged?.Invoke($"Discovered peer: {machineName} ({ip})");
+                OnPeerDiscovered?.Invoke(peer);
+
+                // Tell the remote peer about us (bidirectional registration)
+                try
+                {
+                    var myInfo = JsonSerializer.Serialize(new { machineName = _machineName, port = _port });
+                    await http.PostAsync($"{address}/api/peer/connect",
+                        new StringContent(myInfo, Encoding.UTF8, "application/json"), ct);
+                }
+                catch { }
+            }
+        }
+        catch
+        {
+            // Connection failed — not a FileX peer or unreachable
+        }
+    }
+
+    /// <summary>
+    /// Get all local IPv4 addresses with their subnet masks.
+    /// </summary>
+    private static List<(IPAddress Address, IPAddress Mask)> GetLocalAddressesWithMask()
+    {
+        var result = new List<(IPAddress, IPAddress)>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+
+                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                    result.Add((addr.Address, addr.IPv4Mask));
+                }
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    /// <summary>
+    /// Generate all host IPs in a subnet (excluding network, broadcast, and self).
+    /// For /24 subnets: generates up to 253 IPs.
+    /// For larger subnets: limits to first 254 hosts to avoid excessive scanning.
+    /// </summary>
+    private static List<string> GetSubnetHosts(IPAddress address, IPAddress mask)
+    {
+        var hosts = new List<string>();
+        var ipBytes = address.GetAddressBytes();
+        var maskBytes = mask.GetAddressBytes();
+
+        // Calculate network address and host count
+        var networkBytes = new byte[4];
+        var broadcastBytes = new byte[4];
+        for (int i = 0; i < 4; i++)
+        {
+            networkBytes[i] = (byte)(ipBytes[i] & maskBytes[i]);
+            broadcastBytes[i] = (byte)(ipBytes[i] | ~maskBytes[i]);
+        }
+
+        var networkInt = BitConverter.ToUInt32(networkBytes.Reverse().ToArray(), 0);
+        var broadcastInt = BitConverter.ToUInt32(broadcastBytes.Reverse().ToArray(), 0);
+        var selfInt = BitConverter.ToUInt32(ipBytes.Reverse().ToArray(), 0);
+
+        // Limit scan range to 254 hosts max
+        var hostCount = broadcastInt - networkInt - 1;
+        if (hostCount > 254) hostCount = 254;
+
+        for (uint i = 1; i <= hostCount; i++)
+        {
+            var hostInt = networkInt + i;
+            if (hostInt == selfInt) continue; // skip self
+            if (hostInt == broadcastInt) continue; // skip broadcast
+
+            var bytes = BitConverter.GetBytes(hostInt).Reverse().ToArray();
+            hosts.Add(new IPAddress(bytes).ToString());
+        }
+
+        return hosts;
+    }
+
+    // ===== UDP Discovery (secondary, kept as fallback) =====
 
     /// <summary>
     /// Send discovery messages via both UDP multicast and broadcast.
@@ -184,59 +379,38 @@ public class PeerDiscoveryService
             using var client = new UdpClient();
             client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
-            // Multicast TTL = 2 (stay within local network)
             client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 2);
 
             var msg = JsonSerializer.Serialize(new { instanceId = _instanceId, machineName = _machineName, port = _port });
             var data = Encoding.UTF8.GetBytes(msg);
 
-            OnStatusChanged?.Invoke($"Sending discovery on multicast {MulticastGroup} + broadcast, port {_discoveryPort}");
-
             while (!ct.IsCancellationRequested)
             {
-                // 1. Send to multicast group
                 try
                 {
+                    // Multicast
                     await client.SendAsync(data, data.Length, new IPEndPoint(MulticastGroup, _discoveryPort));
                 }
-                catch (Exception ex)
+                catch { }
+
+                // Subnet broadcast
+                foreach (var addr in GetSubnetBroadcastAddresses())
                 {
-                    OnError?.Invoke($"Multicast send error: {ex.Message}");
+                    try { await client.SendAsync(data, data.Length, new IPEndPoint(addr, _discoveryPort)); }
+                    catch { }
                 }
 
-                // 2. Send to subnet broadcast addresses
-                var broadcastAddrs = GetSubnetBroadcastAddresses();
-                foreach (var addr in broadcastAddrs)
-                {
-                    try
-                    {
-                        await client.SendAsync(data, data.Length, new IPEndPoint(addr, _discoveryPort));
-                    }
-                    catch { /* skip failed interface */ }
-                }
-
-                // 3. Send to limited broadcast as fallback
-                try
-                {
-                    await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, _discoveryPort));
-                }
+                // Limited broadcast
+                try { await client.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, _discoveryPort)); }
                 catch { }
 
                 try { await Task.Delay(_intervalSeconds * 1000, ct); }
                 catch (OperationCanceledException) { break; }
             }
         }
-        catch (SocketException ex)
-        {
-            OnError?.Invoke($"Cannot start discovery sender: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
-        }
+        catch { }
     }
 
-    /// <summary>
-    /// Single listener that receives both multicast and broadcast messages.
-    /// Joins the multicast group to receive multicast, and also receives broadcast
-    /// since it binds to IPAddress.Any.
-    /// </summary>
     private async Task ListenAsync(CancellationToken ct)
     {
         try
@@ -246,36 +420,21 @@ public class PeerDiscoveryService
             listener.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
             listener.Client.Bind(new IPEndPoint(IPAddress.Any, _discoveryPort));
 
-            // Join multicast group to receive multicast messages
-            var joined = false;
-            try
-            {
-                listener.JoinMulticastGroup(MulticastGroup);
-                joined = true;
-            }
+            try { listener.JoinMulticastGroup(MulticastGroup); }
             catch
             {
-                // Try joining on each interface individually
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up) continue;
                     if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
                     if (!ni.SupportsMulticast) continue;
-
                     foreach (var addr in ni.GetIPProperties().UnicastAddresses)
                     {
                         if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                        try
-                        {
-                            listener.JoinMulticastGroup(MulticastGroup, addr.Address);
-                            joined = true;
-                        }
-                        catch { /* skip this interface */ }
+                        try { listener.JoinMulticastGroup(MulticastGroup, addr.Address); } catch { }
                     }
                 }
             }
-
-            OnStatusChanged?.Invoke($"Listening on UDP port {_discoveryPort} (multicast: {(joined ? "yes" : "no")}, broadcast: yes)");
 
             while (!ct.IsCancellationRequested)
             {
@@ -285,26 +444,15 @@ public class PeerDiscoveryService
                     ProcessDiscoveryMessage(result);
                 }
                 catch (OperationCanceledException) { break; }
-                catch (SocketException ex)
+                catch
                 {
-                    OnError?.Invoke($"Listen error: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
                     try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { break; }
-                }
-                catch (Exception ex)
-                {
-                    OnError?.Invoke($"Listen error: {ex.Message}");
                 }
             }
         }
-        catch (SocketException ex)
-        {
-            OnError?.Invoke($"Cannot start listener on port {_discoveryPort}: {ex.Message} (SocketErrorCode: {ex.SocketErrorCode})");
-        }
+        catch { }
     }
 
-    /// <summary>
-    /// Process a received UDP discovery message and register the peer.
-    /// </summary>
     private void ProcessDiscoveryMessage(UdpReceiveResult result)
     {
         try
@@ -336,17 +484,12 @@ public class PeerDiscoveryService
             }
             else
             {
-                // Update LastSeen for existing peers
                 _peers[peerId].LastSeen = DateTime.UtcNow;
             }
         }
-        catch { /* ignore malformed messages */ }
+        catch { }
     }
 
-    /// <summary>
-    /// Get subnet-directed broadcast addresses for all active IPv4 network interfaces.
-    /// E.g. for 192.168.1.5/255.255.255.0, returns 192.168.1.255
-    /// </summary>
     private static List<IPAddress> GetSubnetBroadcastAddresses()
     {
         var result = new List<IPAddress>();
@@ -360,13 +503,11 @@ public class PeerDiscoveryService
                 foreach (var addr in ni.GetIPProperties().UnicastAddresses)
                 {
                     if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-
                     var ipBytes = addr.Address.GetAddressBytes();
                     var maskBytes = addr.IPv4Mask.GetAddressBytes();
                     var broadcastBytes = new byte[4];
                     for (int i = 0; i < 4; i++)
                         broadcastBytes[i] = (byte)(ipBytes[i] | ~maskBytes[i]);
-
                     result.Add(new IPAddress(broadcastBytes));
                 }
             }
@@ -383,7 +524,7 @@ public class PeerDiscoveryService
             catch (OperationCanceledException) { break; }
 
             foreach (var p in _peers.Where(x =>
-                !x.Value.IsManual && // Don't auto-remove manual peers
+                !x.Value.IsManual &&
                 (DateTime.UtcNow - x.Value.LastSeen).TotalSeconds > _timeoutSeconds).ToList())
             {
                 if (_peers.TryRemove(p.Key, out _))
