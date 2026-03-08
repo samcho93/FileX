@@ -50,8 +50,21 @@ public partial class MainWindow : Window
         App.Discovery.OnPeerLost += id => Dispatcher.Invoke(() => RemovePeer(id));
         App.Discovery.OnError += msg => Dispatcher.Invoke(() => ShowStatus($"⚠ {msg}"));
         App.Discovery.OnStatusChanged += msg => Dispatcher.Invoke(() => ShowStatus(msg));
+        App.OnAppStatus += msg => Dispatcher.Invoke(() => ShowStatus(msg));
 
-        Loaded += async (_, _) => await LeftLoadDrives();
+        Loaded += async (_, _) =>
+        {
+            await LeftLoadDrives();
+            ShowLocalInfo();
+        };
+    }
+
+    private void ShowLocalInfo()
+    {
+        var ips = App.GetLocalIPs();
+        var ipText = ips.Count > 0 ? string.Join(", ", ips) : "No network";
+        TxtMachineName.Text = $"{Environment.MachineName}  |  {ipText}:{App.Port}";
+        ShowStatus($"Ready — Other PCs can connect to: {ipText}:{App.Port}");
     }
 
     private void ShowStatus(string msg)

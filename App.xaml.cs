@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Windows;
 using FileX.Services;
@@ -16,6 +19,8 @@ public partial class App : Application
     public static PeerApiClient Api { get; private set; } = null!;
     public static HttpClient Http { get; } = new() { Timeout = TimeSpan.FromMinutes(30) };
     public static int Port { get; private set; } = 5000;
+    public static event Action<string>? OnAppStatus;
+    public static bool WebServerReady { get; private set; }
 
     private readonly CancellationTokenSource _cts = new();
 
@@ -38,11 +43,20 @@ public partial class App : Application
         Api = new PeerApiClient(Http, FileSystem);
         Discovery = new PeerDiscoveryService(Port, discoveryPort, 10, 30);
 
-        // Try to add firewall rules (needs admin, silently fails if not admin)
+        // Add firewall rules with UAC elevation
         EnsureFirewallRules(Port, discoveryPort);
 
-        _ = Task.Run(() => Discovery.StartAsync(_cts.Token));
-        _ = Task.Run(() => StartWebServer(_cts.Token));
+        _ = Task.Run(async () =>
+        {
+            try { await Discovery.StartAsync(_cts.Token); }
+            catch (Exception ex) { OnAppStatus?.Invoke($"Discovery error: {ex.Message}"); }
+        });
+
+        _ = Task.Run(async () =>
+        {
+            try { await StartWebServer(_cts.Token); }
+            catch (Exception ex) { OnAppStatus?.Invoke($"Web server error: {ex.Message}"); }
+        });
     }
 
     private async Task StartWebServer(CancellationToken ct)
@@ -51,6 +65,9 @@ public partial class App : Application
         builder.WebHost.UseUrls($"http://0.0.0.0:{Port}");
         builder.Logging.ClearProviders();
         var app = builder.Build();
+
+        // Peer info endpoint (returns machine name)
+        app.MapGet("/api/peer/info", () => new { machineName = Environment.MachineName });
 
         app.MapGet("/api/peer/drives", () => FileSystem.GetDrives());
         app.MapGet("/api/peer/directory", (string path) => FileSystem.GetDirectoryContents(path));
@@ -72,6 +89,9 @@ public partial class App : Application
         });
         app.MapPost("/api/peer/mkdir", (string path) => Directory.CreateDirectory(Path.GetFullPath(path)));
 
+        WebServerReady = true;
+        OnAppStatus?.Invoke($"Web server started on port {Port}");
+
         ct.Register(() => _ = app.StopAsync());
         await app.RunAsync();
     }
@@ -80,24 +100,54 @@ public partial class App : Application
     {
         try
         {
-            // Check if rules already exist
-            var checkResult = RunNetsh($"advfirewall firewall show rule name=\"FileX TCP\" verbose");
-            if (checkResult.Contains($"{httpPort}")) return; // rules likely exist
+            // Check if rules already exist (this works without admin)
+            var checkTcp = RunCmd("netsh", $"advfirewall firewall show rule name=\"FileX TCP\"");
+            var checkUdp = RunCmd("netsh", $"advfirewall firewall show rule name=\"FileX UDP\"");
 
-            // Add TCP rule for web server
-            RunNetsh($"advfirewall firewall add rule name=\"FileX TCP\" dir=in action=allow protocol=TCP localport={httpPort} profile=any");
-            // Add UDP rule for peer discovery
-            RunNetsh($"advfirewall firewall add rule name=\"FileX UDP\" dir=in action=allow protocol=UDP localport={udpPort} profile=any");
+            bool tcpExists = checkTcp.Contains("FileX TCP");
+            bool udpExists = checkUdp.Contains("FileX UDP");
+
+            if (tcpExists && udpExists) return;
+
+            // Build netsh commands to run with elevation
+            var commands = new List<string>();
+            if (!tcpExists)
+            {
+                commands.Add($"netsh advfirewall firewall add rule name=\"FileX TCP\" dir=in action=allow protocol=TCP localport={httpPort} profile=any");
+            }
+            if (!udpExists)
+            {
+                commands.Add($"netsh advfirewall firewall add rule name=\"FileX UDP\" dir=in action=allow protocol=UDP localport={udpPort} profile=any");
+            }
+
+            // Run with UAC elevation via cmd /c
+            var cmdArgs = string.Join(" & ", commands);
+            var psi = new ProcessStartInfo("cmd.exe", $"/c {cmdArgs}")
+            {
+                Verb = "runas",
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                CreateNoWindow = true
+            };
+
+            var p = Process.Start(psi);
+            p?.WaitForExit(10000);
+            OnAppStatus?.Invoke("Firewall rules added successfully");
         }
-        catch
+        catch (System.ComponentModel.Win32Exception)
         {
-            // Not running as admin - silently ignore
+            // User cancelled UAC prompt
+            OnAppStatus?.Invoke("Firewall rules not added (UAC cancelled). Manual connection may be needed.");
+        }
+        catch (Exception ex)
+        {
+            OnAppStatus?.Invoke($"Firewall setup: {ex.Message}");
         }
     }
 
-    private static string RunNetsh(string args)
+    private static string RunCmd(string fileName, string args)
     {
-        var psi = new ProcessStartInfo("netsh", args)
+        var psi = new ProcessStartInfo(fileName, args)
         {
             CreateNoWindow = true,
             UseShellExecute = false,
@@ -110,6 +160,32 @@ public partial class App : Application
         var output = p.StandardOutput.ReadToEnd();
         p.WaitForExit(5000);
         return output;
+    }
+
+    /// <summary>
+    /// Get the local LAN IP addresses
+    /// </summary>
+    public static List<string> GetLocalIPs()
+    {
+        var ips = new List<string>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+
+                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        ips.Add(addr.Address.ToString());
+                    }
+                }
+            }
+        }
+        catch { }
+        return ips;
     }
 
     protected override void OnExit(ExitEventArgs e)

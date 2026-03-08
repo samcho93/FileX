@@ -71,11 +71,24 @@ public class PeerDiscoveryService
             // Try to connect to the peer
             OnStatusChanged?.Invoke($"Connecting to {address}...");
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+
+            // First try /api/peer/info to get machine name
+            var machineName = ip;
+            try
+            {
+                var infoResp = await http.GetAsync($"{address}/api/peer/info");
+                if (infoResp.IsSuccessStatusCode)
+                {
+                    var json = await infoResp.Content.ReadAsStringAsync();
+                    var doc = System.Text.Json.JsonDocument.Parse(json);
+                    machineName = doc.RootElement.GetProperty("machineName").GetString() ?? ip;
+                }
+            }
+            catch { /* fallback to IP */ }
+
+            // Verify connectivity by fetching drives
             var resp = await http.GetAsync($"{address}/api/peer/drives");
             resp.EnsureSuccessStatusCode();
-
-            // Try to get machine name from the response headers or use IP
-            var machineName = ip;
 
             var peer = new PeerInfo
             {
@@ -88,8 +101,18 @@ public class PeerDiscoveryService
 
             _peers[peerId] = peer;
             OnPeerDiscovered?.Invoke(peer);
-            OnStatusChanged?.Invoke($"Connected to {ip}");
+            OnStatusChanged?.Invoke($"Connected to {machineName} ({ip})");
             return peer;
+        }
+        catch (HttpRequestException ex)
+        {
+            OnError?.Invoke($"Connection refused: {ex.Message} — Check if FileX is running on the remote PC and firewall allows port {_port}");
+            return null;
+        }
+        catch (TaskCanceledException)
+        {
+            OnError?.Invoke($"Connection timed out to {addressInput} — Check network and firewall");
+            return null;
         }
         catch (Exception ex)
         {
