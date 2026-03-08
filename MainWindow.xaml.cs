@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -53,6 +54,10 @@ public partial class MainWindow : Window
     // Debounce timer for auto-refresh when files are received via API
     private readonly DispatcherTimer _refreshTimer;
 
+    // FileSystemWatcher for real-time folder monitoring
+    private FileSystemWatcher? _leftWatcher;
+    private readonly DispatcherTimer _watcherRefreshTimer;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -67,6 +72,15 @@ public partial class MainWindow : Window
         _refreshTimer.Tick += async (_, _) =>
         {
             _refreshTimer.Stop();
+            if (!_leftShowDrives && !string.IsNullOrEmpty(_leftPath))
+                await LeftNavigateTo(_leftPath);
+        };
+
+        // Debounced refresh for FileSystemWatcher events
+        _watcherRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _watcherRefreshTimer.Tick += async (_, _) =>
+        {
+            _watcherRefreshTimer.Stop();
             if (!_leftShowDrives && !string.IsNullOrEmpty(_leftPath))
                 await LeftNavigateTo(_leftPath);
         };
@@ -163,10 +177,52 @@ public partial class MainWindow : Window
         TransferPanel.Visibility = Visibility.Collapsed;
     }
 
+    // ===== FileSystemWatcher =====
+
+    private void StartWatching(string path)
+    {
+        StopWatching();
+        try
+        {
+            _leftWatcher = new FileSystemWatcher(path)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
+                             | NotifyFilters.LastWrite | NotifyFilters.Size,
+                IncludeSubdirectories = false,
+                EnableRaisingEvents = true
+            };
+            _leftWatcher.Created += OnFolderChanged;
+            _leftWatcher.Deleted += OnFolderChanged;
+            _leftWatcher.Renamed += OnFolderChanged;
+            _leftWatcher.Changed += OnFolderChanged;
+        }
+        catch { /* ignore if we can't watch (e.g. network drive) */ }
+    }
+
+    private void StopWatching()
+    {
+        if (_leftWatcher != null)
+        {
+            _leftWatcher.EnableRaisingEvents = false;
+            _leftWatcher.Dispose();
+            _leftWatcher = null;
+        }
+    }
+
+    private void OnFolderChanged(object sender, FileSystemEventArgs e)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _watcherRefreshTimer.Stop();
+            _watcherRefreshTimer.Start();
+        });
+    }
+
     // ===== Left panel (local) =====
 
     private Task LeftLoadDrives()
     {
+        StopWatching();
         _leftShowDrives = true;
         _leftPath = "";
         LeftBreadcrumb.Text = "Drives";
@@ -195,6 +251,7 @@ public partial class MainWindow : Window
             LeftDriveList.Visibility = Visibility.Collapsed;
             ShowEntries(LeftFileList, LeftEmpty, entries);
             LeftBreadcrumb.Text = path;
+            StartWatching(path);
         }
         catch (Exception ex) { ShowEmpty(LeftFileList, LeftDriveList, LeftEmpty, ex.Message); }
         return Task.CompletedTask;
@@ -626,6 +683,72 @@ public partial class MainWindow : Window
             await RightNavigateTo(_rightPath);
         }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
+    }
+
+    // ===== Delete =====
+
+    private async void LeftDelete_Click(object s, RoutedEventArgs e) => await DeleteLeft();
+    private async void RightDelete_Click(object s, RoutedEventArgs e) => await DeleteRight();
+
+    private async void LeftFileList_KeyDown(object s, KeyEventArgs e)
+    {
+        if (e.Key == Key.Delete) await DeleteLeft();
+    }
+
+    private async void RightFileList_KeyDown(object s, KeyEventArgs e)
+    {
+        if (e.Key == Key.Delete) await DeleteRight();
+    }
+
+    private async Task DeleteLeft()
+    {
+        if (_leftShowDrives) return;
+        var items = LeftFileList.SelectedItems.Cast<FileItem>().ToArray();
+        if (items.Length == 0) { ShowStatus("Select files to delete"); return; }
+
+        var names = string.Join("\n", items.Select(f => f.Name));
+        var result = MessageBox.Show($"Delete {items.Length} item(s)?\n\n{names}", "Delete",
+            MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes) return;
+
+        try
+        {
+            foreach (var item in items)
+            {
+                var full = Path.GetFullPath(item.FullPath);
+                if (item.IsDir && Directory.Exists(full))
+                    Directory.Delete(full, true);
+                else if (File.Exists(full))
+                    File.Delete(full);
+            }
+            ShowStatus($"Deleted {items.Length} item(s)");
+            await LeftNavigateTo(_leftPath);
+        }
+        catch (Exception ex) { ShowStatus($"Delete failed: {ex.Message}"); }
+    }
+
+    private async Task DeleteRight()
+    {
+        if (_rightPeerAddress == null) { ShowStatus("No peer connected"); return; }
+        if (_rightShowDrives) return;
+        var items = RightFileList.SelectedItems.Cast<FileItem>().ToArray();
+        if (items.Length == 0) { ShowStatus("Select files to delete"); return; }
+
+        var names = string.Join("\n", items.Select(f => f.Name));
+        var result = MessageBox.Show($"Delete {items.Length} item(s) on remote?\n\n{names}", "Delete Remote",
+            MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes) return;
+
+        try
+        {
+            foreach (var item in items)
+            {
+                await App.Api.DeleteRemote(_rightPeerAddress, item.FullPath);
+            }
+            ShowStatus($"Deleted {items.Length} remote item(s)");
+            await RightNavigateTo(_rightPath);
+        }
+        catch (Exception ex) { ShowStatus($"Delete failed: {ex.Message}"); }
     }
 
     // ===== Utilities =====

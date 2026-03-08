@@ -103,6 +103,29 @@ public partial class App : Application
             if (parent != null) OnFileReceived?.Invoke(parent);
         });
 
+        // Delete file or directory
+        app.MapDelete("/api/peer/file", (string path) =>
+        {
+            var full = Path.GetFullPath(path);
+            if (File.Exists(full))
+            {
+                File.Delete(full);
+                var dir = Path.GetDirectoryName(full);
+                if (dir != null) OnFileReceived?.Invoke(dir);
+            }
+            else if (Directory.Exists(full))
+            {
+                Directory.Delete(full, true);
+                var parent = Path.GetDirectoryName(full);
+                if (parent != null) OnFileReceived?.Invoke(parent);
+            }
+            else
+            {
+                return Results.NotFound();
+            }
+            return Results.Ok();
+        });
+
         // Bidirectional peer registration: when a remote peer connects to us, it sends its info
         app.MapPost("/api/peer/connect", async (HttpContext ctx) =>
         {

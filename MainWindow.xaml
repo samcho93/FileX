@@ -140,6 +140,8 @@
                     <Button Content="Refresh" Click="LeftRefresh_Click" Margin="2"/>
                     <Button Content="&#8594; Send" Click="CopyToRight_Click" Margin="2"
                             ToolTip="Send selected files/folders to remote" FontSize="11"/>
+                    <Button Content="Del" Click="LeftDelete_Click" Margin="2"
+                            ToolTip="Delete selected files/folders (Delete key)" FontSize="11"/>
                 </StackPanel>
                 <Grid>
                     <ListBox x:Name="LeftDriveList" Background="{StaticResource BgPrimary}"
@@ -150,7 +152,8 @@
                               AllowDrop="True" Drop="LeftFileList_Drop" DragOver="FileList_DragOver"
                               PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
                               PreviewMouseMove="FileList_PreviewMouseMove"
-                              MouseDoubleClick="LeftFileList_MouseDoubleClick">
+                              MouseDoubleClick="LeftFileList_MouseDoubleClick"
+                              KeyDown="LeftFileList_KeyDown">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Width="28">
@@ -212,6 +215,8 @@
                     <Button Content="Refresh" Click="RightRefresh_Click" Margin="2"/>
                     <Button Content="&#8592; Receive" Click="CopyToLeft_Click" Margin="2"
                             ToolTip="Download selected files/folders from remote" FontSize="11"/>
+                    <Button Content="Del" Click="RightDelete_Click" Margin="2"
+                            ToolTip="Delete selected files/folders on remote (Delete key)" FontSize="11"/>
                 </StackPanel>
                 <Grid>
                     <ListBox x:Name="RightDriveList" Background="{StaticResource BgPrimary}"
@@ -222,7 +227,8 @@
                               AllowDrop="True" Drop="RightFileList_Drop" DragOver="FileList_DragOver"
                               PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
                               PreviewMouseMove="FileList_PreviewMouseMove"
-                              MouseDoubleClick="RightFileList_MouseDoubleClick">
+                              MouseDoubleClick="RightFileList_MouseDoubleClick"
+                              KeyDown="RightFileList_KeyDown">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Width="28">

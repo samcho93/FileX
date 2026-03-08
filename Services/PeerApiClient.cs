@@ -24,6 +24,15 @@ public class PeerApiClient
             $"{address}/api/peer/directory?path={Uri.EscapeDataString(path)}", Opts) ?? [];
 
     /// <summary>
+    /// Delete a file or directory on the remote peer.
+    /// </summary>
+    public async Task DeleteRemote(string address, string path)
+    {
+        var resp = await _http.DeleteAsync($"{address}/api/peer/file?path={Uri.EscapeDataString(path)}");
+        resp.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
     /// Transfer files to remote peer with per-file progress reporting.
     /// </summary>
     public async Task TransferToRemote(string address, TransferItem[] items, string destDir,
