@@ -727,28 +727,48 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowStatus($"Delete failed: {ex.Message}"); }
     }
 
-    private async Task DeleteRight()
+    private Task DeleteRight()
     {
-        if (_rightPeerAddress == null) { ShowStatus("No peer connected"); return; }
-        if (_rightShowDrives) return;
+        if (_rightPeerAddress == null) { ShowStatus("No peer connected"); return Task.CompletedTask; }
+        if (_rightShowDrives) return Task.CompletedTask;
         var items = RightFileList.SelectedItems.Cast<FileItem>().ToArray();
-        if (items.Length == 0) { ShowStatus("Select files to delete"); return; }
+        if (items.Length == 0) { ShowStatus("Select files to delete"); return Task.CompletedTask; }
 
         var names = string.Join("\n", items.Select(f => f.Name));
         var result = MessageBox.Show($"Delete {items.Length} item(s) on remote?\n\n{names}", "Delete Remote",
             MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (result != MessageBoxResult.Yes) return;
+        if (result != MessageBoxResult.Yes) return Task.CompletedTask;
 
-        try
+        var addr = _rightPeerAddress;
+        var path = _rightPath;
+        ShowStatus($"Deleting {items.Length} remote item(s)...");
+
+        // Run deletions in background with a short-timeout HttpClient to avoid UI freeze
+        _ = Task.Run(async () =>
         {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var failed = 0;
             foreach (var item in items)
             {
-                await App.Api.DeleteRemote(_rightPeerAddress, item.FullPath);
+                try
+                {
+                    var resp = await http.DeleteAsync(
+                        $"{addr}/api/peer/file?path={Uri.EscapeDataString(item.FullPath)}");
+                    resp.EnsureSuccessStatusCode();
+                }
+                catch { failed++; }
             }
-            ShowStatus($"Deleted {items.Length} remote item(s)");
-            await RightNavigateTo(_rightPath);
-        }
-        catch (Exception ex) { ShowStatus($"Delete failed: {ex.Message}"); }
+
+            await Dispatcher.InvokeAsync(async () =>
+            {
+                if (failed > 0)
+                    ShowStatus($"Deleted {items.Length - failed} item(s), {failed} failed");
+                else
+                    ShowStatus($"Deleted {items.Length} remote item(s)");
+                await RightNavigateTo(path);
+            });
+        });
+        return Task.CompletedTask;
     }
 
     // ===== Utilities =====
