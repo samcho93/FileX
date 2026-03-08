@@ -1,0 +1,202 @@
+<Window x:Class="FileX.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="FileX - LAN File Transfer" Height="700" Width="1200"
+    WindowStartupLocation="CenterScreen"
+    Background="{StaticResource BgPrimary}">
+
+    <DockPanel>
+        <!-- Header -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource BgSecondary}"
+                BorderBrush="{StaticResource BorderColor}" BorderThickness="0,0,0,1" Padding="12,6">
+            <DockPanel>
+                <TextBlock Text="FileX" FontSize="18" FontWeight="Bold" Foreground="{StaticResource Accent}" VerticalAlignment="Center"/>
+                <TextBlock Text="LAN File Transfer" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="12,0" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TxtMachineName" Foreground="{StaticResource TextSecondary}" FontSize="12"
+                           DockPanel.Dock="Right" VerticalAlignment="Center" FontFamily="Consolas"/>
+            </DockPanel>
+        </Border>
+
+        <!-- Peer Bar -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource BgSecondary}"
+                BorderBrush="{StaticResource BorderColor}" BorderThickness="0,0,0,1" Padding="12,4">
+            <DockPanel>
+                <!-- Manual Connect (right side) -->
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0">
+                    <TextBox x:Name="TxtManualIp" Width="140" FontSize="12" Padding="4,2"
+                             Background="{StaticResource BgTertiary}" Foreground="{StaticResource TextPrimary}"
+                             BorderBrush="{StaticResource BorderColor}" VerticalAlignment="Center"
+                             FontFamily="Consolas" Text="" ToolTip="IP address (e.g. 192.168.1.5 or 192.168.1.5:5000)"
+                             KeyDown="TxtManualIp_KeyDown"/>
+                    <Button Content="Connect" Click="ManualConnect_Click" Margin="4,0,0,0"
+                            Padding="8,2" FontSize="12" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Peers (left side) -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Peers:" Foreground="{StaticResource TextMuted}" FontSize="12"
+                               VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ItemsControl x:Name="PeerList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                    <TextBlock x:Name="TxtNoPeers" Text="Searching for peers..."
+                               Foreground="{StaticResource TextMuted}" FontSize="12" VerticalAlignment="Center"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Status Bar -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource BgSecondary}"
+                BorderBrush="{StaticResource BorderColor}" BorderThickness="0,1,0,0" Padding="12,3">
+            <TextBlock x:Name="TxtStatus" Text="" Foreground="{StaticResource TextMuted}" FontSize="11"/>
+        </Border>
+
+        <!-- Main Content -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="4"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left Panel -->
+            <DockPanel Grid.Column="0">
+                <Border DockPanel.Dock="Top" Background="{StaticResource BgSecondary}"
+                        BorderBrush="{StaticResource BorderColor}" BorderThickness="0,0,0,1" Padding="8,4">
+                    <StackPanel>
+                        <TextBlock x:Name="LeftTitle" Text="Local" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimary}" Margin="0,0,0,2"/>
+                        <TextBlock x:Name="LeftBreadcrumb" Foreground="{StaticResource TextSecondary}"
+                                   FontSize="12" FontFamily="Consolas" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </Border>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Background="{StaticResource BgTertiary}"
+                            Margin="0" Height="28">
+                    <Button Content="&#8593; Up" Click="LeftUp_Click" Margin="4,2"/>
+                    <Button Content="Refresh" Click="LeftRefresh_Click" Margin="2"/>
+                </StackPanel>
+                <Grid>
+                    <ListBox x:Name="LeftDriveList" Background="{StaticResource BgPrimary}"
+                             BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             MouseDoubleClick="LeftDriveList_MouseDoubleClick"/>
+                    <ListView x:Name="LeftFileList" Background="{StaticResource BgPrimary}"
+                              BorderThickness="0" SelectionMode="Extended" Visibility="Collapsed"
+                              AllowDrop="True" Drop="LeftFileList_Drop" DragOver="FileList_DragOver"
+                              PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
+                              PreviewMouseMove="FileList_PreviewMouseMove"
+                              MouseDoubleClick="LeftFileList_MouseDoubleClick">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Width="28">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Icon}" FontSize="14"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Name" Width="220">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Name}" Foreground="{Binding NameColor}" FontSize="13"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Size" Width="80">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding SizeText}" TextAlignment="Right" Width="70"
+                                                       Foreground="{StaticResource TextSecondary}" FontSize="12" FontFamily="Consolas"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Modified" Width="130">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DateText}" TextAlignment="Right" Width="120"
+                                                       Foreground="{StaticResource TextMuted}" FontSize="12"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                    <TextBlock x:Name="LeftEmpty" Text="Loading..." Foreground="{StaticResource TextMuted}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" Visibility="Collapsed"/>
+                </Grid>
+            </DockPanel>
+
+            <!-- Splitter -->
+            <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch"
+                          Background="{StaticResource BorderColor}" Cursor="SizeWE"/>
+
+            <!-- Right Panel -->
+            <DockPanel Grid.Column="2">
+                <Border DockPanel.Dock="Top" Background="{StaticResource BgSecondary}"
+                        BorderBrush="{StaticResource BorderColor}" BorderThickness="0,0,0,1" Padding="8,4">
+                    <StackPanel>
+                        <TextBlock x:Name="RightTitle" Text="Remote (select a peer)" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimary}" Margin="0,0,0,2"/>
+                        <TextBlock x:Name="RightBreadcrumb" Foreground="{StaticResource TextSecondary}"
+                                   FontSize="12" FontFamily="Consolas" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </Border>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Background="{StaticResource BgTertiary}"
+                            Margin="0" Height="28">
+                    <Button Content="&#8593; Up" Click="RightUp_Click" Margin="4,2"/>
+                    <Button Content="Refresh" Click="RightRefresh_Click" Margin="2"/>
+                </StackPanel>
+                <Grid>
+                    <ListBox x:Name="RightDriveList" Background="{StaticResource BgPrimary}"
+                             BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             MouseDoubleClick="RightDriveList_MouseDoubleClick" Visibility="Collapsed"/>
+                    <ListView x:Name="RightFileList" Background="{StaticResource BgPrimary}"
+                              BorderThickness="0" SelectionMode="Extended" Visibility="Collapsed"
+                              AllowDrop="True" Drop="RightFileList_Drop" DragOver="FileList_DragOver"
+                              PreviewMouseLeftButtonDown="FileList_PreviewMouseDown"
+                              PreviewMouseMove="FileList_PreviewMouseMove"
+                              MouseDoubleClick="RightFileList_MouseDoubleClick">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Width="28">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Icon}" FontSize="14"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Name" Width="220">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Name}" Foreground="{Binding NameColor}" FontSize="13"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Size" Width="80">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding SizeText}" TextAlignment="Right" Width="70"
+                                                       Foreground="{StaticResource TextSecondary}" FontSize="12" FontFamily="Consolas"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Modified" Width="130">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DateText}" TextAlignment="Right" Width="120"
+                                                       Foreground="{StaticResource TextMuted}" FontSize="12"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                    <TextBlock x:Name="RightEmpty" Text="Select a peer to browse files"
+                               Foreground="{StaticResource TextMuted}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13"/>
+                </Grid>
+            </DockPanel>
+        </Grid>
+    </DockPanel>
+</Window>

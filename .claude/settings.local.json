@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(test -d \"D:\\\\Work\\\\CSharp\\\\FileX\")",
+      "Bash(dotnet --version)",
+      "Bash(dotnet --list-sdks)",
+      "Bash(dotnet new list)"
+    ]
+  }
+}
