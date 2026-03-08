@@ -248,6 +248,13 @@ public partial class MainWindow : Window
         {
             TxtManualIp.Text = "";
             ShowStatus($"Connected to {peer.MachineName} ({ip})");
+
+            // Auto-select the peer for right panel
+            _rightPeerId = peer.Id;
+            _rightPeerAddress = peer.Address;
+            RightTitle.Text = peer.MachineName + " (Remote)";
+            RenderPeers();
+            await RightLoadDrives();
         }
     }
 
