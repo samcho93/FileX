@@ -30,6 +30,10 @@
                              KeyDown="TxtManualIp_KeyDown"/>
                     <Button Content="Connect" Click="ManualConnect_Click" Margin="4,0,0,0"
                             Padding="8,2" FontSize="12" VerticalAlignment="Center"/>
+                    <Button x:Name="BtnDisconnect" Content="✕" Click="Disconnect_Click" Margin="4,0,0,0"
+                            Padding="6,2" FontSize="12" VerticalAlignment="Center"
+                            ToolTip="Disconnect from selected peer"
+                            Foreground="#ff6666" Visibility="Collapsed"/>
                 </StackPanel>
 
                 <!-- Peers (left side) -->
@@ -57,9 +61,15 @@
                     <DockPanel>
                         <TextBlock Text="Transfers" FontSize="11" FontWeight="SemiBold"
                                    Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
-                        <Button x:Name="BtnClearTransfers" Content="Clear" DockPanel.Dock="Right"
-                                Click="ClearTransfers_Click" Padding="6,1" FontSize="10"
-                                VerticalAlignment="Center" Margin="4,0,0,0"/>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button x:Name="BtnCancelTransfer" Content="Cancel" Click="CancelTransfer_Click"
+                                    Padding="6,1" FontSize="10" VerticalAlignment="Center" Margin="4,0,0,0"
+                                    Foreground="#ff6666" Visibility="Collapsed"
+                                    ToolTip="Cancel current transfer"/>
+                            <Button x:Name="BtnClearTransfers" Content="Clear"
+                                    Click="ClearTransfers_Click" Padding="6,1" FontSize="10"
+                                    VerticalAlignment="Center" Margin="4,0,0,0"/>
+                        </StackPanel>
                     </DockPanel>
                 </Border>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">

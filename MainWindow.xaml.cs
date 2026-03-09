@@ -33,6 +33,7 @@ public partial class MainWindow : Window
 
     // Transfer progress tracking
     private readonly ObservableCollection<TransferProgressInfo> _transfers = [];
+    private CancellationTokenSource? _transferCts;
 
     // Display items
     class FileItem
@@ -492,6 +493,7 @@ public partial class MainWindow : Window
             _rightPeerId = peer.Id;
             _rightPeerAddress = peer.Address;
             RightTitle.Text = peer.MachineName + " (Remote)";
+            BtnDisconnect.Visibility = Visibility.Visible;
             RenderPeers();
             await RightLoadDrives();
             return;
@@ -502,14 +504,47 @@ public partial class MainWindow : Window
     private void RemovePeer(string id)
     {
         _peers.RemoveAll(p => p.Id == id);
-        if (_rightPeerId == id) { _rightPeerId = null; _rightPeerAddress = null; RightTitle.Text = "Remote (select a peer)"; RightEmpty.Text = "Select a peer"; }
+        if (_rightPeerId == id)
+        {
+            // Cancel active transfer if any
+            _transferCts?.Cancel();
+
+            // Try to switch to another peer
+            var next = _peers.Count > 0 ? _peers[^1] : null;
+            if (next != null)
+            {
+                _rightPeerId = next.Id;
+                _rightPeerAddress = next.Address;
+                RightTitle.Text = next.MachineName + " (Remote)";
+            }
+            else
+            {
+                _rightPeerId = null;
+                _rightPeerAddress = null;
+                RightTitle.Text = "Remote (select a peer)";
+                RightFileList.Visibility = Visibility.Collapsed;
+                RightDriveList.Visibility = Visibility.Collapsed;
+                RightEmpty.Text = "Peer disconnected";
+                RightEmpty.Visibility = Visibility.Visible;
+                RightBreadcrumb.Text = "";
+            }
+        }
         RenderPeers();
+        BtnDisconnect.Visibility = _rightPeerId != null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Disconnect_Click(object s, RoutedEventArgs e)
+    {
+        if (_rightPeerId == null) return;
+        var id = _rightPeerId;
+        App.Discovery.RemovePeer(id); // removes from discovery service & fires OnPeerLost
     }
 
     private void RenderPeers()
     {
         PeerList.Items.Clear();
         TxtNoPeers.Visibility = _peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        BtnDisconnect.Visibility = _rightPeerId != null ? Visibility.Visible : Visibility.Collapsed;
         foreach (var p in _peers)
         {
             var btn = new Button
@@ -542,6 +577,28 @@ public partial class MainWindow : Window
         }
     }
 
+    // ===== Transfer cancel =====
+
+    private void CancelTransfer_Click(object s, RoutedEventArgs e)
+    {
+        _transferCts?.Cancel();
+        ShowStatus("Cancelling transfer...");
+    }
+
+    private void BeginTransfer()
+    {
+        _transferCts?.Dispose();
+        _transferCts = new CancellationTokenSource();
+        BtnCancelTransfer.Visibility = Visibility.Visible;
+    }
+
+    private void EndTransfer()
+    {
+        BtnCancelTransfer.Visibility = Visibility.Collapsed;
+        _transferCts?.Dispose();
+        _transferCts = null;
+    }
+
     // ===== Copy buttons =====
 
     private async void CopyToRight_Click(object s, RoutedEventArgs e)
@@ -555,15 +612,18 @@ public partial class MainWindow : Window
             .ToArray();
         if (items.Length == 0) { ShowStatus("Select files to send"); return; }
 
+        BeginTransfer();
         ShowStatus($"Uploading {items.Length} item(s)...");
         try
         {
             await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath,
-                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete, _transferCts!.Token);
             ShowStatus($"Upload complete \u2014 {items.Length} item(s)");
             await RightNavigateTo(_rightPath);
         }
+        catch (OperationCanceledException) { ShowStatus("Upload cancelled"); }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
+        finally { EndTransfer(); }
     }
 
     private async void CopyToLeft_Click(object s, RoutedEventArgs e)
@@ -577,15 +637,18 @@ public partial class MainWindow : Window
             .ToArray();
         if (items.Length == 0) { ShowStatus("Select files to download"); return; }
 
+        BeginTransfer();
         ShowStatus($"Downloading {items.Length} item(s)...");
         try
         {
             await App.Api.TransferFromRemote(_rightPeerAddress, items, _leftPath,
-                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete, _transferCts!.Token);
             ShowStatus($"Download complete \u2014 {items.Length} item(s)");
             await LeftNavigateTo(_leftPath);
         }
+        catch (OperationCanceledException) { ShowStatus("Download cancelled"); }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); }
+        finally { EndTransfer(); }
     }
 
     // ===== Drag & Drop =====
@@ -736,16 +799,19 @@ public partial class MainWindow : Window
 
         var items = _dragItems;
         var peerAddr = _dragPeerAddr;
+        BeginTransfer();
         ShowStatus($"Downloading {items.Length} item(s)...");
 
         try
         {
             await App.Api.TransferFromRemote(peerAddr, items, _leftPath,
-                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete, _transferCts!.Token);
             ShowStatus($"Download complete \u2014 {items.Length} item(s)");
             await LeftNavigateTo(_leftPath);
         }
+        catch (OperationCanceledException) { ShowStatus("Download cancelled"); }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
+        finally { EndTransfer(); }
     }
 
     private async void RightFileList_Drop(object s, DragEventArgs e)
@@ -755,16 +821,19 @@ public partial class MainWindow : Window
         if (_rightShowDrives || _rightPeerAddress == null) { MessageBox.Show("Please navigate to a folder first."); return; }
 
         var items = _dragItems;
+        BeginTransfer();
         ShowStatus($"Uploading {items.Length} item(s)...");
 
         try
         {
             await App.Api.TransferToRemote(_rightPeerAddress, items, _rightPath,
-                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete);
+                OnTransferFileStart, OnTransferProgress, OnTransferFileComplete, _transferCts!.Token);
             ShowStatus($"Upload complete \u2014 {items.Length} item(s)");
             await RightNavigateTo(_rightPath);
         }
+        catch (OperationCanceledException) { ShowStatus("Upload cancelled"); }
         catch (Exception ex) { ShowStatus($"Transfer failed: {ex.Message}"); MessageBox.Show("Transfer failed: " + ex.Message); }
+        finally { EndTransfer(); }
     }
 
     // ===== Delete =====

@@ -40,6 +40,15 @@ public class PeerDiscoveryService
     public PeerInfo? GetPeer(string peerId) => _peers.GetValueOrDefault(peerId);
 
     /// <summary>
+    /// Explicitly remove a peer (e.g. user clicked Disconnect).
+    /// </summary>
+    public void RemovePeer(string peerId)
+    {
+        if (_peers.TryRemove(peerId, out _))
+            OnPeerLost?.Invoke(peerId);
+    }
+
+    /// <summary>
     /// Register a peer that connected to us (called from the web server endpoint).
     /// </summary>
     public void RegisterIncomingPeer(string ip, int peerPort, string machineName)
@@ -523,12 +532,37 @@ public class PeerDiscoveryService
             try { await Task.Delay(10_000, ct); }
             catch (OperationCanceledException) { break; }
 
+            // Remove non-manual peers that timed out (not heard from in _timeoutSeconds)
             foreach (var p in _peers.Where(x =>
                 !x.Value.IsManual &&
                 (DateTime.UtcNow - x.Value.LastSeen).TotalSeconds > _timeoutSeconds).ToList())
             {
                 if (_peers.TryRemove(p.Key, out _))
                     OnPeerLost?.Invoke(p.Key);
+            }
+
+            // Health-check manual peers by pinging /api/peer/info
+            foreach (var p in _peers.Where(x => x.Value.IsManual).ToList())
+            {
+                try
+                {
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                    var resp = await http.GetAsync($"{p.Value.Address}/api/peer/info", ct);
+                    if (resp.IsSuccessStatusCode)
+                        p.Value.LastSeen = DateTime.UtcNow;
+                    else
+                    {
+                        if (_peers.TryRemove(p.Key, out _))
+                            OnPeerLost?.Invoke(p.Key);
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch
+                {
+                    // Peer unreachable — remove it
+                    if (_peers.TryRemove(p.Key, out _))
+                        OnPeerLost?.Invoke(p.Key);
+                }
             }
         }
     }

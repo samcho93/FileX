@@ -38,12 +38,14 @@ public class PeerApiClient
     public async Task TransferToRemote(string address, TransferItem[] items, string destDir,
         Action<TransferProgressInfo>? onFileStart = null,
         Action<TransferProgressInfo>? onProgress = null,
-        Action<TransferProgressInfo>? onFileComplete = null)
+        Action<TransferProgressInfo>? onFileComplete = null,
+        CancellationToken ct = default)
     {
         foreach (var item in items)
         {
+            ct.ThrowIfCancellationRequested();
             if (item.IsDirectory)
-                await UploadDir(address, item.FullPath, item.Name, destDir, onFileStart, onProgress, onFileComplete);
+                await UploadDir(address, item.FullPath, item.Name, destDir, onFileStart, onProgress, onFileComplete, ct);
             else
             {
                 var remotePath = Path.Combine(destDir, item.Name);
@@ -59,10 +61,17 @@ public class PeerApiClient
 
                 try
                 {
-                    await UploadFileWithProgress(address, item.FullPath, remotePath, info, onProgress);
+                    await UploadFileWithProgress(address, item.FullPath, remotePath, info, onProgress, ct);
                     info.Status = TransferStatus.Completed;
                     info.StatusText = $"Completed - {FormatSize(fileSize)}";
                     onFileComplete?.Invoke(info);
+                }
+                catch (OperationCanceledException)
+                {
+                    info.Status = TransferStatus.Failed;
+                    info.StatusText = "Cancelled";
+                    onFileComplete?.Invoke(info);
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -81,12 +90,14 @@ public class PeerApiClient
     public async Task TransferFromRemote(string address, TransferItem[] items, string localDir,
         Action<TransferProgressInfo>? onFileStart = null,
         Action<TransferProgressInfo>? onProgress = null,
-        Action<TransferProgressInfo>? onFileComplete = null)
+        Action<TransferProgressInfo>? onFileComplete = null,
+        CancellationToken ct = default)
     {
         foreach (var item in items)
         {
+            ct.ThrowIfCancellationRequested();
             if (item.IsDirectory)
-                await DownloadDir(address, item.FullPath, item.Name, localDir, onFileStart, onProgress, onFileComplete);
+                await DownloadDir(address, item.FullPath, item.Name, localDir, onFileStart, onProgress, onFileComplete, ct);
             else
             {
                 var localPath = Path.Combine(localDir, item.Name);
@@ -101,10 +112,19 @@ public class PeerApiClient
 
                 try
                 {
-                    await DownloadFileWithProgress(address, item.FullPath, localPath, info, onProgress);
+                    await DownloadFileWithProgress(address, item.FullPath, localPath, info, onProgress, ct);
                     info.Status = TransferStatus.Completed;
                     info.StatusText = $"Completed - {FormatSize(info.TotalBytes)}";
                     onFileComplete?.Invoke(info);
+                }
+                catch (OperationCanceledException)
+                {
+                    info.Status = TransferStatus.Failed;
+                    info.StatusText = "Cancelled";
+                    onFileComplete?.Invoke(info);
+                    // Clean up partial file
+                    try { if (File.Exists(localPath)) File.Delete(localPath); } catch { }
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -118,7 +138,7 @@ public class PeerApiClient
     }
 
     private async Task UploadFileWithProgress(string addr, string localPath, string remotePath,
-        TransferProgressInfo info, Action<TransferProgressInfo>? onProgress)
+        TransferProgressInfo info, Action<TransferProgressInfo>? onProgress, CancellationToken ct = default)
     {
         await using var fileStream = _fs.OpenFileForRead(localPath);
         var progressStream = new ProgressStream(fileStream, bytesRead =>
@@ -130,19 +150,19 @@ public class PeerApiClient
 
         using var content = new StreamContent(progressStream, 81920);
         var resp = await _http.PostAsync(
-            $"{addr}/api/peer/file?path={Uri.EscapeDataString(remotePath)}", content);
+            $"{addr}/api/peer/file?path={Uri.EscapeDataString(remotePath)}", content, ct);
         resp.EnsureSuccessStatusCode();
     }
 
     private async Task DownloadFileWithProgress(string addr, string remotePath, string localPath,
-        TransferProgressInfo info, Action<TransferProgressInfo>? onProgress)
+        TransferProgressInfo info, Action<TransferProgressInfo>? onProgress, CancellationToken ct = default)
     {
         var dir = Path.GetDirectoryName(localPath);
         if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
         using var resp = await _http.GetAsync(
             $"{addr}/api/peer/file?path={Uri.EscapeDataString(remotePath)}",
-            HttpCompletionOption.ResponseHeadersRead);
+            HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
 
         // Get content length if available
@@ -150,7 +170,7 @@ public class PeerApiClient
         if (contentLength.HasValue && info.TotalBytes == 0)
             info.TotalBytes = contentLength.Value;
 
-        await using var rs = await resp.Content.ReadAsStreamAsync();
+        await using var rs = await resp.Content.ReadAsStreamAsync(ct);
         await using var ls = new FileStream(localPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
 
         await StreamCopyHelper.CopyWithProgressAsync(rs, ls, bytesRead =>
@@ -160,7 +180,7 @@ public class PeerApiClient
                 ? $"{FormatSize(bytesRead)} / {FormatSize(info.TotalBytes)}"
                 : $"{FormatSize(bytesRead)}";
             onProgress?.Invoke(info);
-        });
+        }, ct: ct);
 
         // Update total if we didn't know it before
         if (info.TotalBytes == 0)
@@ -169,15 +189,17 @@ public class PeerApiClient
 
     private async Task UploadDir(string addr, string localDir, string dirName, string remoteParent,
         Action<TransferProgressInfo>? onFileStart, Action<TransferProgressInfo>? onProgress,
-        Action<TransferProgressInfo>? onFileComplete)
+        Action<TransferProgressInfo>? onFileComplete, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var remote = Path.Combine(remoteParent, dirName);
-        await _http.PostAsync($"{addr}/api/peer/mkdir?path={Uri.EscapeDataString(remote)}", null);
+        await _http.PostAsync($"{addr}/api/peer/mkdir?path={Uri.EscapeDataString(remote)}", null, ct);
 
         foreach (var e in _fs.GetDirectoryContents(localDir))
         {
+            ct.ThrowIfCancellationRequested();
             if (e.IsDirectory)
-                await UploadDir(addr, e.FullPath, e.Name, remote, onFileStart, onProgress, onFileComplete);
+                await UploadDir(addr, e.FullPath, e.Name, remote, onFileStart, onProgress, onFileComplete, ct);
             else
             {
                 var remotePath = Path.Combine(remote, e.Name);
@@ -193,10 +215,17 @@ public class PeerApiClient
 
                 try
                 {
-                    await UploadFileWithProgress(addr, e.FullPath, remotePath, info, onProgress);
+                    await UploadFileWithProgress(addr, e.FullPath, remotePath, info, onProgress, ct);
                     info.Status = TransferStatus.Completed;
                     info.StatusText = $"Completed - {FormatSize(fileSize)}";
                     onFileComplete?.Invoke(info);
+                }
+                catch (OperationCanceledException)
+                {
+                    info.Status = TransferStatus.Failed;
+                    info.StatusText = "Cancelled";
+                    onFileComplete?.Invoke(info);
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -211,16 +240,18 @@ public class PeerApiClient
 
     private async Task DownloadDir(string addr, string remoteDir, string dirName, string localParent,
         Action<TransferProgressInfo>? onFileStart, Action<TransferProgressInfo>? onProgress,
-        Action<TransferProgressInfo>? onFileComplete)
+        Action<TransferProgressInfo>? onFileComplete, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var local = Path.Combine(localParent, dirName);
         Directory.CreateDirectory(local);
         var entries = await GetRemoteDirectory(addr, remoteDir);
 
         foreach (var e in entries)
         {
+            ct.ThrowIfCancellationRequested();
             if (e.IsDirectory)
-                await DownloadDir(addr, e.FullPath, e.Name, local, onFileStart, onProgress, onFileComplete);
+                await DownloadDir(addr, e.FullPath, e.Name, local, onFileStart, onProgress, onFileComplete, ct);
             else
             {
                 var localPath = Path.Combine(local, e.Name);
@@ -235,10 +266,19 @@ public class PeerApiClient
 
                 try
                 {
-                    await DownloadFileWithProgress(addr, e.FullPath, localPath, info, onProgress);
+                    await DownloadFileWithProgress(addr, e.FullPath, localPath, info, onProgress, ct);
                     info.Status = TransferStatus.Completed;
                     info.StatusText = $"Completed - {FormatSize(info.TotalBytes)}";
                     onFileComplete?.Invoke(info);
+                }
+                catch (OperationCanceledException)
+                {
+                    info.Status = TransferStatus.Failed;
+                    info.StatusText = "Cancelled";
+                    onFileComplete?.Invoke(info);
+                    // Clean up partial file
+                    try { if (File.Exists(localPath)) File.Delete(localPath); } catch { }
+                    throw;
                 }
                 catch (Exception ex)
                 {

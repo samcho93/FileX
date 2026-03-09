@@ -148,7 +148,8 @@ public partial class App : Application
         });
 
         WebServerReady = true;
-        OnAppStatus?.Invoke($"Web server started on port {Port}");
+        var localIPs = string.Join(", ", GetLocalIPs());
+        OnAppStatus?.Invoke($"Web server started on port {Port} — IPs: {localIPs}");
 
         ct.Register(() => _ = app.StopAsync());
         await app.RunAsync();
