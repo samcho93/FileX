@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- 배경 그라데이션 -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4a4af0"/>
+      <stop offset="100%" style="stop-color:#6c6cf0"/>
+    </linearGradient>
+    <!-- 화살표 그라데이션 -->
+    <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ffffff; stop-opacity:0.9"/>
+      <stop offset="100%" style="stop-color:#d0d0ff; stop-opacity:0.9"/>
+    </linearGradient>
+    <!-- SAM 텍스트 그라데이션 -->
+    <linearGradient id="samGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#c8c8ff"/>
+    </linearGradient>
+    <!-- 그림자 필터 -->
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="textShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#2a2a80" flood-opacity="0.6"/>
+    </filter>
+    <!-- 내부 글로우 -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 둥근 사각형 배경 -->
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bgGrad)" filter="url(#shadow)"/>
+
+  <!-- 배경 장식 원 -->
+  <circle cx="400" cy="120" r="80" fill="#ffffff" opacity="0.05"/>
+  <circle cx="120" cy="400" r="60" fill="#ffffff" opacity="0.05"/>
+
+  <!-- 왼쪽 파일 아이콘 (보내는 쪽) -->
+  <g transform="translate(80, 140)" filter="url(#glow)">
+    <!-- 파일 본체 -->
+    <path d="M0,20 Q0,0 20,0 L80,0 L110,30 L110,150 Q110,170 90,170 L20,170 Q0,170 0,150 Z"
+          fill="#ffffff" opacity="0.25"/>
+    <!-- 접힌 모서리 -->
+    <path d="M80,0 L80,30 L110,30 Z" fill="#ffffff" opacity="0.15"/>
+    <!-- 파일 내 줄 -->
+    <line x1="20" y1="55" x2="75" y2="55" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="75" x2="85" y2="75" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="95" x2="65" y2="95" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="115" x2="80" y2="115" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="135" x2="50" y2="135" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+  </g>
+
+  <!-- 오른쪽 파일 아이콘 (받는 쪽) -->
+  <g transform="translate(322, 200)" filter="url(#glow)">
+    <!-- 파일 본체 -->
+    <path d="M0,20 Q0,0 20,0 L80,0 L110,30 L110,150 Q110,170 90,170 L20,170 Q0,170 0,150 Z"
+          fill="#ffffff" opacity="0.25"/>
+    <!-- 접힌 모서리 -->
+    <path d="M80,0 L80,30 L110,30 Z" fill="#ffffff" opacity="0.15"/>
+    <!-- 파일 내 줄 -->
+    <line x1="20" y1="55" x2="75" y2="55" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="75" x2="85" y2="75" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="95" x2="65" y2="95" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="115" x2="80" y2="115" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+    <line x1="20" y1="135" x2="50" y2="135" stroke="#ffffff" stroke-width="4" opacity="0.4" stroke-linecap="round"/>
+  </g>
+
+  <!-- 전송 화살표 (오른쪽 →) -->
+  <g transform="translate(200, 195)">
+    <line x1="0" y1="0" x2="100" y2="45" stroke="url(#arrowGrad)" stroke-width="8" stroke-linecap="round"/>
+    <polygon points="100,45 72,32 82,55" fill="#ffffff" opacity="0.9"/>
+  </g>
+
+  <!-- 전송 화살표 (왼쪽 ←) -->
+  <g transform="translate(200, 310)">
+    <line x1="110" y1="0" x2="10" y2="45" stroke="url(#arrowGrad)" stroke-width="8" stroke-linecap="round"/>
+    <polygon points="10,45 38,32 28,55" fill="#ffffff" opacity="0.9"/>
+  </g>
+
+  <!-- 작은 전송 점들 (데이터 흐름 표현) -->
+  <circle cx="230" cy="218" r="4" fill="#ffffff" opacity="0.6"/>
+  <circle cx="255" cy="230" r="3" fill="#ffffff" opacity="0.5"/>
+  <circle cx="278" cy="240" r="4" fill="#ffffff" opacity="0.6"/>
+
+  <circle cx="282" cy="328" r="4" fill="#ffffff" opacity="0.6"/>
+  <circle cx="257" cy="338" r="3" fill="#ffffff" opacity="0.5"/>
+  <circle cx="232" cy="348" r="4" fill="#ffffff" opacity="0.6"/>
+
+  <!-- SAM 텍스트 (중앙에 크게, 겹쳐서 보이도록) -->
+  <text x="256" y="300"
+        font-family="Arial Black, Arial, Helvetica, sans-serif"
+        font-weight="900"
+        font-size="160"
+        fill="url(#samGrad)"
+        fill-opacity="0.85"
+        text-anchor="middle"
+        dominant-baseline="central"
+        letter-spacing="8"
+        filter="url(#textShadow)">SAM</text>
+
+  <!-- SAM 외곽선 (겹침 효과 강조) -->
+  <text x="256" y="300"
+        font-family="Arial Black, Arial, Helvetica, sans-serif"
+        font-weight="900"
+        font-size="160"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="1.5"
+        stroke-opacity="0.3"
+        text-anchor="middle"
+        dominant-baseline="central"
+        letter-spacing="8">SAM</text>
+</svg>
